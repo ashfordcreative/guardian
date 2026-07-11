@@ -3,7 +3,7 @@
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
  * Description:       Self-contained smart auto-updates. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. No external services. Full log for client reporting.
- * Version:           2.0.1
+ * Version:           2.0.2
  * Author:            Ashford Creative
  * License:           GPL-2.0+
  * Requires at least: 6.0
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ASH_GUARDIAN_VERSION', '2.0.1' );
+define( 'ASH_GUARDIAN_VERSION', '2.0.2' );
 define( 'ASH_GUARDIAN_FILE', __FILE__ );
 define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -433,15 +433,9 @@ final class Ashford_Guardian {
 			return;
 		}
 		wp_enqueue_style(
-			'ashford-guardian-fonts',
-			'https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,560;0,9..40,650;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap',
-			array(),
-			null
-		);
-		wp_enqueue_style(
 			'ashford-guardian-admin',
 			plugins_url( 'assets/css/admin.css', ASH_GUARDIAN_FILE ),
-			array( 'ashford-guardian-fonts' ),
+			array(),
 			ASH_GUARDIAN_VERSION
 		);
 	}
