@@ -4,7 +4,7 @@ Tags: updates, auto-update, maintenance, security
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.0.0
+Stable tag: 2.0.1
 License: GPL-2.0+
 
 Self-contained smart auto-updates. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans.
@@ -28,6 +28,9 @@ Configure policy under Tools → Guardian. Activity is logged for client reporti
 3. Optionally tune delays and denylist under Tools → Guardian.
 
 == Changelog ==
+
+= 2.0.1 =
+* Modernized Tools → Guardian admin UI with clearer Check for updates / Apply due updates actions.
 
 = 2.0.0 =
 * Initial public release with policy engine, security fast-track, digest email, and admin log.
