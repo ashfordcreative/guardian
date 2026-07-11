@@ -40,4 +40,6 @@ Zip → ManageWP bulk install → activate. Policy defaults are sane; tune under
 
 ## Self-updating
 
-Drop [plugin-update-checker](https://github.com/YahnisElsts/plugin-update-checker) into `/plugin-update-checker`, set your repo URL in the main file, push tagged releases.
+GitHub Releases power WordPress/ManageWP updates via the embedded
+[plugin-update-checker](https://github.com/YahnisElsts/plugin-update-checker).
+See [RELEASING.md](RELEASING.md) for the tag → zip → update flow.

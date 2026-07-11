@@ -14,19 +14,36 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-/**
- * Optional: GitHub-based updates for this plugin itself.
- * Drop the plugin-update-checker library into /plugin-update-checker
- * and set your repo URL below.
+define( 'ASH_GUARDIAN_VERSION', '2.0.0' );
+define( 'ASH_GUARDIAN_FILE', __FILE__ );
+define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
+
+/*
+ * GitHub-powered updates.
+ *
+ * Sites check the GitHub repo for new releases and surface them as normal
+ * WordPress plugin updates (visible in wp-admin and ManageWP).
+ *
+ * Set the repo below (or define ASH_GUARDIAN_GITHUB_REPO in wp-config.php).
+ * For a private repo, define ASH_GUARDIAN_GITHUB_TOKEN with a read-only
+ * fine-grained personal access token.
  */
-if ( file_exists( __DIR__ . '/plugin-update-checker/plugin-update-checker.php' ) ) {
-	require __DIR__ . '/plugin-update-checker/plugin-update-checker.php';
-	if ( class_exists( '\YahnisElsts\PluginUpdateChecker\v5\PucFactory' ) ) {
-		\YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-			'https://github.com/YOURNAME/ashford-guardian/', // <-- change me
-			__FILE__,
-			'ashford-guardian'
-		);
+if ( file_exists( ASH_GUARDIAN_DIR . 'vendor/plugin-update-checker/plugin-update-checker.php' ) ) {
+	require_once ASH_GUARDIAN_DIR . 'vendor/plugin-update-checker/plugin-update-checker.php';
+
+	$ash_guardian_repo = defined( 'ASH_GUARDIAN_GITHUB_REPO' )
+		? ASH_GUARDIAN_GITHUB_REPO
+		: 'https://github.com/ashfordcreative/guardian/';
+
+	$ash_guardian_updates = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+		$ash_guardian_repo,
+		ASH_GUARDIAN_FILE,
+		'ashford-guardian'
+	);
+	$ash_guardian_updates->getVcsApi()->enableReleaseAssets();
+
+	if ( defined( 'ASH_GUARDIAN_GITHUB_TOKEN' ) && ASH_GUARDIAN_GITHUB_TOKEN ) {
+		$ash_guardian_updates->setAuthentication( ASH_GUARDIAN_GITHUB_TOKEN );
 	}
 }
 

@@ -1,0 +1,58 @@
+# Ashford Guardian — release builder
+#
+# Push a tag like v2.0.1 and this workflow:
+#   1. verifies the tag matches the version in ashford-guardian.php
+#   2. builds a clean ashford-guardian.zip (repo files, minus dev files)
+#   3. creates a GitHub Release with the zip attached
+#
+# Plugin Update Checker (embedded in the plugin) picks up the release asset,
+# and every site running the plugin sees a normal WordPress update.
+#
+# File location in the repo: .github/workflows/release.yml
+
+name: Build release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches plugin version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PLUGIN_VERSION=$(grep -oP '^\s*\*\s*Version:\s*\K[0-9.]+' ashford-guardian.php)
+          echo "Tag: $TAG_VERSION / Plugin header: $PLUGIN_VERSION"
+          if [ "$TAG_VERSION" != "$PLUGIN_VERSION" ]; then
+            echo "::error::Tag ($TAG_VERSION) does not match the Version header in ashford-guardian.php ($PLUGIN_VERSION). Bump the header, commit, and re-tag."
+            exit 1
+          fi
+
+      - name: Build zip
+        run: |
+          mkdir -p build/ashford-guardian
+          rsync -a ./ build/ashford-guardian \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "build" \
+            --exclude "RELEASING.md" \
+            --exclude ".gitignore" \
+            --exclude ".distignore"
+          cd build
+          zip -rq ashford-guardian.zip ashford-guardian
+          unzip -l ashford-guardian.zip | head -20
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/ashford-guardian.zip
+          generate_release_notes: true
