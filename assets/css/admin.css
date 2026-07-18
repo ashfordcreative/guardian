@@ -147,7 +147,7 @@
 
 .ag-status {
 	display: grid;
-	grid-template-columns: repeat(4, minmax(0, 1fr));
+	grid-template-columns: repeat(5, minmax(0, 1fr));
 	gap: 12px;
 	margin: 0 0 24px;
 }
@@ -184,6 +184,10 @@
 
 .ag-status__item--manual .ag-status__value {
 	color: var(--ag-manual);
+}
+
+.ag-status__item--blocked .ag-status__value {
+	color: var(--ag-block);
 }
 
 /* —— Sections —— */
@@ -317,6 +321,45 @@
 	background: #1d2327;
 	color: #fff;
 	border-color: #1d2327;
+}
+
+.ag-chip--license,
+.ag-chip--failed {
+	background: #fcf0f1;
+	color: var(--ag-block);
+	border-color: #d63638;
+}
+
+.ag-updates--blocked {
+	margin-top: 0;
+}
+
+.ag-chip--paired {
+	background: var(--ag-sage-soft);
+	color: var(--ag-sage);
+	border-color: #68de7c;
+}
+
+.ag-chip--pending {
+	background: var(--ag-warn-soft);
+	color: var(--ag-warn);
+	border-color: #dba617;
+}
+
+.ag-chip--error {
+	background: #fcf0f1;
+	color: var(--ag-block);
+	border-color: #e5a3a3;
+}
+
+.ag-chip--unpaired {
+	background: var(--ag-manual-soft);
+	color: var(--ag-manual);
+}
+
+.ag-log__type--pair,
+.ag-log__type--flush {
+	color: var(--ag-sage);
 }
 
 .ag-empty {
@@ -506,6 +549,10 @@
 
 	.ag-status {
 		grid-template-columns: 1fr 1fr;
+	}
+
+	.ag-status__item--blocked {
+		grid-column: 1 / -1;
 	}
 
 	.ag-update {

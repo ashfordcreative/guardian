@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
- * Description:       Self-contained smart auto-updates. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. No external services. Full log for client reporting.
- * Version:           2.0.2
+ * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. Policy keeps working even if the hub is unreachable.
+ * Version:           2.1.1
  * Author:            Ashford Creative
  * License:           GPL-2.0+
  * Requires at least: 6.0
@@ -14,9 +14,32 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ASH_GUARDIAN_VERSION', '2.0.2' );
+define( 'ASH_GUARDIAN_VERSION', '2.1.1' );
 define( 'ASH_GUARDIAN_FILE', __FILE__ );
 define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
+
+/*
+ * Guardian Hub integration (optional). Everything under includes/ is
+ * additive: it emits events to a hub the operator pairs to, but the
+ * auto-update policy engine below has zero dependency on any of it and
+ * keeps working exactly as before if the hub is never configured or is
+ * unreachable.
+ */
+foreach (
+	array(
+		'class-ashford-guardian-crypto.php',
+		'class-ashford-guardian-hub-settings.php',
+		'class-ashford-guardian-event-queue.php',
+		'class-ashford-guardian-hub-client.php',
+		'class-ashford-guardian-held-releases.php',
+		'class-ashford-guardian-inventory.php',
+		'class-ashford-guardian-commands.php',
+		'class-ashford-guardian-actor-capture.php',
+		'class-ashford-guardian-hub.php',
+	) as $ash_guardian_include
+) {
+	require_once ASH_GUARDIAN_DIR . 'includes/' . $ash_guardian_include;
+}
 
 /*
  * GitHub-powered updates.
@@ -52,10 +75,11 @@ final class Ashford_Guardian {
 	const CRON_HOOK      = 'ashford_guardian_hourly_tick';
 	const OPT_FIRST_SEEN = 'ag_first_seen';   // "slug|version" => unix timestamp update was first observed
 	const OPT_SECURITY   = 'ag_security_flag'; // "slug|version" => 1|0 changelog security detection cache
-	const OPT_LOG        = 'ag_log';
-	const OPT_SETTINGS   = 'ag_settings';
-	const OPT_NOTIFY_Q   = 'ag_notify_queue';
-	const LOG_MAX        = 300;
+	const OPT_LOG           = 'ag_log';
+	const OPT_SETTINGS      = 'ag_settings';
+	const OPT_NOTIFY_Q      = 'ag_notify_queue';
+	const OPT_UPDATE_BLOCKS = 'ag_update_blocks'; // slug => blocked/failed update issue
+	const LOG_MAX           = 300;
 
 	/** Changelog phrases that mark a release as security-related. */
 	const SECURITY_KEYWORDS = array(
@@ -67,6 +91,13 @@ final class Ashford_Guardian {
 
 	private static $instance = null;
 	private $settings        = null;
+
+	/** True while wp_maybe_auto_update() is running inside our own tick(). */
+	private static $in_policy_tick = false;
+
+	public static function is_policy_tick() {
+		return self::$in_policy_tick;
+	}
 
 	public static function instance() {
 		if ( null === self::$instance ) {
@@ -82,7 +113,7 @@ final class Ashford_Guardian {
 		add_action( self::CRON_HOOK, array( $this, 'tick' ) );
 		add_filter( 'auto_update_plugin', array( $this, 'decide' ), 20, 2 );
 		add_action( 'upgrader_process_complete', array( $this, 'log_completed_updates' ), 10, 2 );
-		add_action( 'automatic_updates_complete', array( $this, 'flush_notify_queue' ) );
+		add_action( 'automatic_updates_complete', array( $this, 'on_automatic_updates_complete' ) );
 
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_admin_assets' ) );
@@ -114,8 +145,15 @@ final class Ashford_Guardian {
 	}
 
 	private function get_denylist() {
-		$s = $this->get_settings();
-		return array_filter( array_map( 'trim', explode( "\n", (string) $s['denylist'] ) ) );
+		$s    = $this->get_settings();
+		$list = array_filter( array_map( 'trim', explode( "\n", (string) $s['denylist'] ) ) );
+
+		/**
+		 * Filters the effective denylist. Used by the hub integration to
+		 * merge in slugs held via a `hold_release` command, without this
+		 * class needing to know anything about the hub.
+		 */
+		return apply_filters( 'ashford_guardian_denylist', $list );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -141,8 +179,17 @@ final class Ashford_Guardian {
 
 		// Hand off to core. Our decide() filter approves or holds each one.
 		if ( function_exists( 'wp_maybe_auto_update' ) && ! wp_installing() ) {
+			self::$in_policy_tick = true;
 			wp_maybe_auto_update();
+			self::$in_policy_tick = false;
 		}
+
+		/**
+		 * Fires after each policy tick. Used by the hub integration to
+		 * piggyback an agent.checkin without needing its own hourly cron.
+		 * Purely additive — nothing here affects the policy engine itself.
+		 */
+		do_action( 'ashford_guardian_after_tick' );
 	}
 
 	/**
@@ -176,6 +223,49 @@ final class Ashford_Guardian {
 		if ( $fresh ) {
 			$this->log( 'observe', 'New updates available: ' . implode( ', ', $fresh ) );
 		}
+
+		$this->sync_license_blocks( $updates );
+		$this->maybe_notify_blocked_updates();
+	}
+
+	/**
+	 * Public accessor for the hub's inventory builder. Same data as
+	 * get_pending_updates(), kept private for the policy engine itself.
+	 */
+	public function get_pending_updates_public() {
+		return $this->get_pending_updates();
+	}
+
+	/**
+	 * Public accessor for the hub's inventory builder.
+	 */
+	public function evaluate_update_public( $slug, $info ) {
+		return $this->evaluate_update( $slug, $info );
+	}
+
+	/**
+	 * Active license-blocked / failed update issues for UI + inventory.
+	 *
+	 * @return array<string, array{reason:string,message:string,version:string,name:string,since:int,notified:int}>
+	 */
+	public function get_update_blocks_public() {
+		return $this->get_update_blocks();
+	}
+
+	/**
+	 * True when the update object has no downloadable package (typical expired license).
+	 *
+	 * @param object|null $item Update transient item.
+	 */
+	public static function package_is_missing( $item ) {
+		if ( ! is_object( $item ) ) {
+			return true;
+		}
+		if ( ! isset( $item->package ) ) {
+			return true;
+		}
+		$package = $item->package;
+		return ( '' === $package || false === $package || null === $package );
 	}
 
 	/**
@@ -245,6 +335,11 @@ final class Ashford_Guardian {
 
 		// Hard block for denylisted plugins, even if auto-updates enabled elsewhere.
 		if ( in_array( $item->slug, $this->get_denylist(), true ) ) {
+			return false;
+		}
+
+		// No package URL — typically a premium updater with an inactive/expired license.
+		if ( self::package_is_missing( $item ) ) {
 			return false;
 		}
 
@@ -355,6 +450,216 @@ final class Ashford_Guardian {
 	}
 
 	/* ------------------------------------------------------------------ */
+	/* Blocked / failed updates (license + auto-update failures)           */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * @return array<string, array{reason:string,message:string,version:string,name:string,since:int,notified:int}>
+	 */
+	private function get_update_blocks() {
+		$blocks = get_option( self::OPT_UPDATE_BLOCKS, array() );
+		return is_array( $blocks ) ? $blocks : array();
+	}
+
+	/**
+	 * Record or refresh a blocked/failed update. Resets notified when reason
+	 * or target version changes so a new digest can fire.
+	 *
+	 * @return bool True when a new/changed issue was stored.
+	 */
+	private function record_update_block( $slug, $reason, $message, $version = '', $name = '' ) {
+		$slug    = (string) $slug;
+		$reason  = (string) $reason;
+		$version = (string) $version;
+		$blocks  = $this->get_update_blocks();
+		$existing = isset( $blocks[ $slug ] ) ? $blocks[ $slug ] : null;
+
+		if (
+			$existing
+			&& (string) ( $existing['reason'] ?? '' ) === $reason
+			&& (string) ( $existing['version'] ?? '' ) === $version
+		) {
+			return false;
+		}
+
+		$entry = array(
+			'reason'   => $reason,
+			'message'  => (string) $message,
+			'version'  => $version,
+			'name'     => $name ? (string) $name : (string) ( $existing['name'] ?? $slug ),
+			'since'    => time(),
+			'notified' => 0,
+		);
+		$blocks[ $slug ] = $entry;
+		update_option( self::OPT_UPDATE_BLOCKS, $blocks, false );
+
+		$this->log(
+			'blocked',
+			sprintf(
+				'%s: %s%s',
+				$slug,
+				$message,
+				$version ? ' (→ ' . $version . ')' : ''
+			)
+		);
+
+		/**
+		 * Fires when a new or changed blocked/failed update is recorded.
+		 * Hub integration emits update.blocked from this hook.
+		 *
+		 * @param string $slug  Plugin slug.
+		 * @param array  $entry Block record.
+		 */
+		do_action( 'ashford_guardian_update_blocked', $slug, $entry );
+
+		return true;
+	}
+
+	private function clear_update_block( $slug ) {
+		$blocks = $this->get_update_blocks();
+		if ( ! isset( $blocks[ $slug ] ) ) {
+			return;
+		}
+		unset( $blocks[ $slug ] );
+		update_option( self::OPT_UPDATE_BLOCKS, $blocks, false );
+	}
+
+	/**
+	 * Mark pending updates with an empty package as license-blocked; clear
+	 * resolved license/failed issues when a package becomes available.
+	 *
+	 * @param array<string, array> $updates From get_pending_updates().
+	 */
+	private function sync_license_blocks( array $updates ) {
+		foreach ( $updates as $slug => $u ) {
+			$item = $u['item'] ?? null;
+			if ( self::package_is_missing( $item ) ) {
+				$this->record_update_block(
+					$slug,
+					'license',
+					'Update available but no download — check license.',
+					(string) ( $u['new_version'] ?? '' ),
+					(string) ( $u['name'] ?? $slug )
+				);
+				continue;
+			}
+
+			$blocks = $this->get_update_blocks();
+			if ( ! isset( $blocks[ $slug ] ) ) {
+				continue;
+			}
+			// Usable package again — clear license or prior failed attempts.
+			if ( in_array( $blocks[ $slug ]['reason'] ?? '', array( 'license', 'failed' ), true ) ) {
+				$this->clear_update_block( $slug );
+			}
+		}
+
+		foreach ( $this->get_update_blocks() as $slug => $block ) {
+			if ( 'license' === ( $block['reason'] ?? '' ) && ! isset( $updates[ $slug ] ) ) {
+				$this->clear_update_block( $slug );
+			}
+		}
+	}
+
+	/**
+	 * @param array|mixed $results From WP_Automatic_Updater::$update_results.
+	 */
+	private function record_auto_update_failures( $results ) {
+		if ( empty( $results['plugin'] ) || ! is_array( $results['plugin'] ) ) {
+			return;
+		}
+
+		if ( ! function_exists( 'get_plugins' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+		$installed = get_plugins();
+
+		foreach ( $results['plugin'] as $row ) {
+			$row = (object) $row;
+			if ( true === ( $row->result ?? null ) ) {
+				continue;
+			}
+
+			$item = isset( $row->item ) ? $row->item : null;
+			$file = '';
+			if ( is_object( $item ) && ! empty( $item->plugin ) ) {
+				$file = (string) $item->plugin;
+			} elseif ( is_object( $item ) && ! empty( $item->file ) ) {
+				$file = (string) $item->file;
+			}
+
+			$slug = '';
+			if ( is_object( $item ) && ! empty( $item->slug ) ) {
+				$slug = (string) $item->slug;
+			} elseif ( $file ) {
+				$slug = strpos( $file, '/' ) !== false ? dirname( $file ) : basename( $file, '.php' );
+			}
+			if ( '' === $slug ) {
+				continue;
+			}
+
+			$message = is_wp_error( $row->result )
+				? $row->result->get_error_message()
+				: 'Automatic update failed.';
+			$version = is_object( $item ) ? (string) ( $item->new_version ?? '' ) : '';
+			$name    = (string) ( $row->name ?? ( $installed[ $file ]['Name'] ?? $slug ) );
+
+			$this->record_update_block( $slug, 'failed', $message, $version, $name );
+		}
+	}
+
+	/**
+	 * One digest for newly recorded blocked/failed updates (notified=0).
+	 * Same issue is not re-mailed until reason or target version changes.
+	 */
+	private function maybe_notify_blocked_updates() {
+		if ( ! $this->get_settings()['email_notify'] ) {
+			return;
+		}
+
+		$blocks = $this->get_update_blocks();
+		$fresh  = array();
+		foreach ( $blocks as $slug => $block ) {
+			if ( empty( $block['notified'] ) ) {
+				$fresh[ $slug ] = $block;
+			}
+		}
+		if ( empty( $fresh ) ) {
+			return;
+		}
+
+		$host  = wp_parse_url( home_url(), PHP_URL_HOST );
+		$lines = array();
+		foreach ( $fresh as $slug => $block ) {
+			$label   = ! empty( $block['name'] ) ? $block['name'] : $slug;
+			$reason  = 'license' === ( $block['reason'] ?? '' ) ? 'license' : 'failed';
+			$version = ! empty( $block['version'] ) ? ' → ' . $block['version'] : '';
+			$lines[] = sprintf(
+				'- %s (%s)%s: %s',
+				$label,
+				$reason,
+				$version,
+				(string) ( $block['message'] ?? '' )
+			);
+		}
+
+		wp_mail(
+			get_option( 'admin_email' ),
+			sprintf( '[%s] Guardian: %d plugin update(s) blocked', $host, count( $fresh ) ),
+			"Ashford Guardian could not apply these plugin updates:\n\n"
+			. implode( "\n", $lines )
+			. "\n\nSite: " . home_url()
+			. "\nTime: " . current_time( 'mysql' )
+			. "\nLog: " . admin_url( 'tools.php?page=ashford-guardian' )
+		);
+
+		foreach ( array_keys( $fresh ) as $slug ) {
+			$blocks[ $slug ]['notified'] = 1;
+		}
+		update_option( self::OPT_UPDATE_BLOCKS, $blocks, false );
+	}
+
+	/* ------------------------------------------------------------------ */
 	/* Logging + notification                                              */
 	/* ------------------------------------------------------------------ */
 
@@ -396,8 +701,21 @@ final class Ashford_Guardian {
 			$slug = strpos( $file, '/' ) !== false ? dirname( $file ) : basename( $file, '.php' );
 			$this->log( 'updated', sprintf( 'Updated: %s.', $slug ) );
 			$queue[] = $slug;
+			$this->clear_update_block( $slug );
 		}
 		update_option( self::OPT_NOTIFY_Q, array_unique( $queue ), false );
+	}
+
+	/**
+	 * After core finishes an automatic update run: capture failures, then
+	 * send success + blocked digests as needed.
+	 *
+	 * @param array $results WP_Automatic_Updater::$update_results.
+	 */
+	public function on_automatic_updates_complete( $results ) {
+		$this->record_auto_update_failures( $results );
+		$this->flush_notify_queue();
+		$this->maybe_notify_blocked_updates();
 	}
 
 	/**
@@ -443,7 +761,7 @@ final class Ashford_Guardian {
 	/**
 	 * Evaluate a pending update for display: type, age, decision label, status bucket.
 	 *
-	 * @return array{type:string,age:float,is_sec:bool,decision:string,status:string}
+	 * @return array{type:string,age:float,is_sec:bool,is_license:bool,decision:string,status:string}
 	 */
 	private function evaluate_update( $slug, $info ) {
 		$s       = $this->get_settings();
@@ -452,47 +770,62 @@ final class Ashford_Guardian {
 		$is_sec  = $s['security_fast'] ? $this->is_security_release( $slug, $info['new_version'], $info['item'] ) : false;
 		$denied  = in_array( $slug, $this->get_denylist(), true );
 
+		if ( self::package_is_missing( $info['item'] ?? null ) ) {
+			return array(
+				'type'       => $type,
+				'age'        => $age,
+				'is_sec'     => $is_sec,
+				'is_license' => true,
+				'decision'   => 'Update available but no download — check license',
+				'status'     => 'block',
+			);
+		}
+
 		if ( $denied ) {
 			return array(
-				'type'     => $type,
-				'age'      => $age,
-				'is_sec'   => $is_sec,
-				'decision' => 'Denylisted — manual only',
-				'status'   => 'block',
+				'type'       => $type,
+				'age'        => $age,
+				'is_sec'     => $is_sec,
+				'is_license' => false,
+				'decision'   => 'Denylisted — manual only',
+				'status'     => 'block',
 			);
 		}
 
 		if ( $is_sec && in_array( $type, array( 'patch', 'minor' ), true ) ) {
 			return array(
-				'type'     => $type,
-				'age'      => $age,
-				'is_sec'   => true,
-				'decision' => 'Security release — updating now',
-				'status'   => 'due',
+				'type'       => $type,
+				'age'        => $age,
+				'is_sec'     => true,
+				'is_license' => false,
+				'decision'   => 'Security release — updating now',
+				'status'     => 'due',
 			);
 		}
 
 		if ( 'patch' === $type ) {
 			$due = $age >= (int) $s['patch_delay_days'];
 			return array(
-				'type'     => $type,
-				'age'      => $age,
-				'is_sec'   => $is_sec,
-				'decision' => $due ? 'Updating now' : 'Scheduled',
-				'status'   => $due ? 'due' : 'wait',
+				'type'       => $type,
+				'age'        => $age,
+				'is_sec'     => $is_sec,
+				'is_license' => false,
+				'decision'   => $due ? 'Updating now' : 'Scheduled',
+				'status'     => $due ? 'due' : 'wait',
 			);
 		}
 
 		if ( 'minor' === $type ) {
 			$due = $age >= (int) $s['minor_delay_days'];
 			return array(
-				'type'     => $type,
-				'age'      => $age,
-				'is_sec'   => $is_sec,
-				'decision' => $due
+				'type'       => $type,
+				'age'        => $age,
+				'is_sec'     => $is_sec,
+				'is_license' => false,
+				'decision'   => $due
 					? 'Updating now'
 					: sprintf( 'Waiting (%.1f of %d days)', $age, (int) $s['minor_delay_days'] ),
-				'status'   => $due ? 'due' : 'wait',
+				'status'     => $due ? 'due' : 'wait',
 			);
 		}
 
@@ -500,30 +833,33 @@ final class Ashford_Guardian {
 			if ( $s['allow_major'] ) {
 				$due = $age >= (int) $s['major_delay_days'];
 				return array(
-					'type'     => $type,
-					'age'      => $age,
-					'is_sec'   => $is_sec,
-					'decision' => $due
+					'type'       => $type,
+					'age'        => $age,
+					'is_sec'     => $is_sec,
+					'is_license' => false,
+					'decision'   => $due
 						? 'Updating now'
 						: sprintf( 'Waiting (%.1f of %d days)', $age, (int) $s['major_delay_days'] ),
-					'status'   => $due ? 'due' : 'wait',
+					'status'     => $due ? 'due' : 'wait',
 				);
 			}
 			return array(
-				'type'     => $type,
-				'age'      => $age,
-				'is_sec'   => $is_sec,
-				'decision' => 'Major — manual',
-				'status'   => 'manual',
+				'type'       => $type,
+				'age'        => $age,
+				'is_sec'     => $is_sec,
+				'is_license' => false,
+				'decision'   => 'Major — manual',
+				'status'     => 'manual',
 			);
 		}
 
 		return array(
-			'type'     => $type,
-			'age'      => $age,
-			'is_sec'   => $is_sec,
-			'decision' => 'Unrecognized versioning — manual',
-			'status'   => 'manual',
+			'type'       => $type,
+			'age'        => $age,
+			'is_sec'     => $is_sec,
+			'is_license' => false,
+			'decision'   => 'Unrecognized versioning — manual',
+			'status'     => 'manual',
 		);
 	}
 
@@ -566,6 +902,7 @@ final class Ashford_Guardian {
 	public function render_admin_page() {
 		$s       = $this->get_settings();
 		$pending = $this->get_pending_updates();
+		$blocks  = $this->get_update_blocks();
 		$log     = array_reverse( get_option( self::OPT_LOG, array() ) );
 
 		$evaluated = array();
@@ -574,17 +911,33 @@ final class Ashford_Guardian {
 			'due'     => 0,
 			'wait'    => 0,
 			'manual'  => 0,
+			'blocked' => count( $blocks ),
 		);
 		foreach ( $pending as $slug => $info ) {
-			$ev               = $this->evaluate_update( $slug, $info );
+			$ev                 = $this->evaluate_update( $slug, $info );
 			$evaluated[ $slug ] = $ev;
 			$counts['pending']++;
+			if ( ! empty( $ev['is_license'] ) ) {
+				// License-blocked pending rows are counted via $blocks, not Manual.
+				continue;
+			}
 			if ( 'due' === $ev['status'] ) {
 				$counts['due']++;
 			} elseif ( 'wait' === $ev['status'] ) {
 				$counts['wait']++;
+			} elseif ( 'block' === $ev['status'] ) {
+				// Denylist — treat as manual hold for the strip.
+				$counts['manual']++;
 			} else {
 				$counts['manual']++;
+			}
+		}
+
+		// Failed (or license) issues no longer advertised in update_plugins.
+		$orphan_blocks = array();
+		foreach ( $blocks as $slug => $block ) {
+			if ( ! isset( $pending[ $slug ] ) ) {
+				$orphan_blocks[ $slug ] = $block;
 			}
 		}
 
@@ -641,6 +994,10 @@ final class Ashford_Guardian {
 					<span class="ag-status__label">Manual</span>
 					<span class="ag-status__value"><?php echo (int) $counts['manual']; ?></span>
 				</div>
+				<div class="ag-status__item ag-status__item--blocked">
+					<span class="ag-status__label">Blocked</span>
+					<span class="ag-status__value"><?php echo (int) $counts['blocked']; ?></span>
+				</div>
 			</div>
 
 			<section class="ag-section">
@@ -669,6 +1026,9 @@ final class Ashford_Guardian {
 								</div>
 								<div class="ag-update__meta">
 									<span class="ag-chip ag-chip--<?php echo esc_attr( $ev['type'] ); ?>"><?php echo esc_html( $ev['type'] ); ?></span>
+									<?php if ( ! empty( $ev['is_license'] ) ) : ?>
+										<span class="ag-chip ag-chip--license">license</span>
+									<?php endif; ?>
 									<?php if ( $ev['is_sec'] ) : ?>
 										<span class="ag-chip ag-chip--security">security</span>
 									<?php endif; ?>
@@ -680,6 +1040,38 @@ final class Ashford_Guardian {
 						<?php endforeach; ?>
 					<?php endif; ?>
 				</div>
+
+				<?php if ( ! empty( $orphan_blocks ) ) : ?>
+					<div class="ag-section__head" style="margin-top:16px">
+						<h3 class="ag-section__title">Blocked updates</h3>
+					</div>
+					<div class="ag-updates ag-updates--blocked">
+						<?php foreach ( $orphan_blocks as $slug => $block ) :
+							$reason_label = 'license' === ( $block['reason'] ?? '' ) ? 'license' : 'failed';
+							$since        = ! empty( $block['since'] ) ? human_time_diff( (int) $block['since'] ) . ' ago' : '';
+							?>
+							<article class="ag-update">
+								<div>
+									<p class="ag-update__name"><?php echo esc_html( $block['name'] ?? $slug ); ?></p>
+									<p class="ag-update__slug"><?php echo esc_html( $slug ); ?><?php echo $since ? ' · ' . esc_html( $since ) : ''; ?></p>
+								</div>
+								<div class="ag-update__versions">
+									<?php if ( ! empty( $block['version'] ) ) : ?>
+										→ <strong><?php echo esc_html( $block['version'] ); ?></strong>
+									<?php else : ?>
+										—
+									<?php endif; ?>
+								</div>
+								<div class="ag-update__meta">
+									<span class="ag-chip ag-chip--<?php echo esc_attr( $reason_label ); ?>"><?php echo esc_html( $reason_label ); ?></span>
+								</div>
+								<div class="ag-update__decision ag-update__decision--block">
+									<?php echo esc_html( $block['message'] ?? 'Update blocked.' ); ?>
+								</div>
+							</article>
+						<?php endforeach; ?>
+					</div>
+				<?php endif; ?>
 			</section>
 
 			<section class="ag-section">
@@ -755,7 +1147,7 @@ final class Ashford_Guardian {
 						<div class="ag-field__control">
 							<label class="ag-check">
 								<input type="checkbox" name="ag_email_notify" value="1" <?php checked( $s['email_notify'], 1 ); ?> />
-								<span>Send one digest email per update run</span>
+								<span>Send digests for applied updates and newly blocked/failed updates</span>
 							</label>
 						</div>
 					</div>
@@ -765,6 +1157,15 @@ final class Ashford_Guardian {
 					</div>
 				</form>
 			</section>
+
+			<?php
+			/**
+			 * Fires after the Policy section, before Activity. The hub
+			 * integration hooks in here to render its own pairing/status
+			 * section without this file needing to know anything about it.
+			 */
+			do_action( 'ashford_guardian_admin_sections', $s );
+			?>
 
 			<section class="ag-section">
 				<div class="ag-section__head">
@@ -790,3 +1191,4 @@ final class Ashford_Guardian {
 }
 
 Ashford_Guardian::instance();
+Ashford_Guardian_Hub::instance();
