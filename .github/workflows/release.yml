@@ -44,6 +44,7 @@ jobs:
             --exclude ".git" \
             --exclude ".github" \
             --exclude "build" \
+            --exclude "tests" \
             --exclude "RELEASING.md" \
             --exclude ".gitignore" \
             --exclude ".distignore"

@@ -330,6 +330,21 @@
 	border-color: #d63638;
 }
 
+.ag-chip--core {
+	background: #f0f6fc;
+	color: #135e96;
+	border-color: #72aee6;
+}
+
+.ag-chip--disabled,
+.ag-chip--filesystem,
+.ag-chip--vcs,
+.ag-chip--compat {
+	background: #fcf0f1;
+	color: var(--ag-block);
+	border-color: #d63638;
+}
+
 .ag-updates--blocked {
 	margin-top: 0;
 }

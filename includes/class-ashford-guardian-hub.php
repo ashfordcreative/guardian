@@ -229,6 +229,7 @@ final class Ashford_Guardian_Hub {
 		$reason  = (string) ( $entry['reason'] ?? 'failed' );
 		$version = (string) ( $entry['version'] ?? '' );
 		$message = (string) ( $entry['message'] ?? 'Update blocked.' );
+		$kind    = (string) ( $entry['kind'] ?? ( 'wordpress' === $slug ? 'core' : 'plugin' ) );
 
 		$this->emit(
 			'update.blocked',
@@ -240,7 +241,7 @@ final class Ashford_Guardian_Hub {
 				$version ? " → {$version}" : ''
 			),
 			array(
-				'kind'    => 'plugin',
+				'kind'    => $kind,
 				'slug'    => $slug,
 				'reason'  => $reason,
 				'version' => $version,

@@ -3,7 +3,7 @@
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
  * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. Policy keeps working even if the hub is unreachable.
- * Version:           2.1.1
+ * Version:           2.2.0
  * Author:            Ashford Creative
  * License:           GPL-2.0+
  * Requires at least: 6.0
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ASH_GUARDIAN_VERSION', '2.1.1' );
+define( 'ASH_GUARDIAN_VERSION', '2.2.0' );
 define( 'ASH_GUARDIAN_FILE', __FILE__ );
 define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -27,6 +27,7 @@ define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
  */
 foreach (
 	array(
+		'ashford-guardian-core-version.php',
 		'class-ashford-guardian-crypto.php',
 		'class-ashford-guardian-hub-settings.php',
 		'class-ashford-guardian-event-queue.php',
@@ -79,6 +80,7 @@ final class Ashford_Guardian {
 	const OPT_SETTINGS      = 'ag_settings';
 	const OPT_NOTIFY_Q      = 'ag_notify_queue';
 	const OPT_UPDATE_BLOCKS = 'ag_update_blocks'; // slug => blocked/failed update issue
+	const CORE_BLOCK_KEY    = 'wordpress';
 	const LOG_MAX           = 300;
 
 	/** Changelog phrases that mark a release as security-related. */
@@ -112,6 +114,10 @@ final class Ashford_Guardian {
 
 		add_action( self::CRON_HOOK, array( $this, 'tick' ) );
 		add_filter( 'auto_update_plugin', array( $this, 'decide' ), 20, 2 );
+		add_filter( 'allow_minor_auto_core_updates', array( $this, 'filter_allow_minor_core' ) );
+		add_filter( 'allow_major_auto_core_updates', array( $this, 'filter_allow_major_core' ) );
+		add_filter( 'allow_dev_auto_core_updates', '__return_false' );
+		add_filter( 'auto_update_core', array( $this, 'decide_core' ), 20, 2 );
 		add_action( 'upgrader_process_complete', array( $this, 'log_completed_updates' ), 10, 2 );
 		add_action( 'automatic_updates_complete', array( $this, 'on_automatic_updates_complete' ) );
 
@@ -136,6 +142,7 @@ final class Ashford_Guardian {
 					'allow_major'       => 0,   // X.y.z bumps: manual by default
 					'major_delay_days'  => 7,
 					'security_fast'     => 1,   // changelog says "security" => skip the delay (patch/minor)
+					'core_minor_updates'=> 1,   // same-branch WP maintenance/security releases
 					'email_notify'      => 1,
 					'denylist'          => '',  // one slug per line, never auto-updated
 				)
@@ -198,6 +205,9 @@ final class Ashford_Guardian {
 	 */
 	private function refresh_and_observe() {
 		wp_update_plugins();
+		if ( function_exists( 'wp_version_check' ) ) {
+			wp_version_check();
+		}
 
 		$updates = $this->get_pending_updates();
 		$seen    = get_option( self::OPT_FIRST_SEEN, array() );
@@ -212,10 +222,23 @@ final class Ashford_Guardian {
 			}
 		}
 
+		$core_offer = $this->find_same_branch_core_offer();
+		if ( $core_offer ) {
+			$core_ver = (string) ( $core_offer->current ?? '' );
+			$core_key = self::CORE_BLOCK_KEY . '|' . $core_ver;
+			if ( $core_ver && ! isset( $seen[ $core_key ] ) ) {
+				$seen[ $core_key ] = $now;
+				$fresh[]           = 'wordpress → ' . $core_ver;
+			}
+		}
+
 		// Prune entries for updates that no longer exist (superseded or applied).
 		$valid_keys = array();
 		foreach ( $updates as $slug => $u ) {
 			$valid_keys[] = $slug . '|' . $u['new_version'];
+		}
+		if ( $core_offer && ! empty( $core_offer->current ) ) {
+			$valid_keys[] = self::CORE_BLOCK_KEY . '|' . $core_offer->current;
 		}
 		$seen = array_intersect_key( $seen, array_flip( $valid_keys ) );
 		update_option( self::OPT_FIRST_SEEN, $seen, false );
@@ -225,6 +248,7 @@ final class Ashford_Guardian {
 		}
 
 		$this->sync_license_blocks( $updates );
+		$this->sync_core_update_state( $core_offer );
 		$this->maybe_notify_blocked_updates();
 	}
 
@@ -266,6 +290,72 @@ final class Ashford_Guardian {
 		}
 		$package = $item->package;
 		return ( '' === $package || false === $package || null === $package );
+	}
+
+	public static function version_branch( $version ) {
+		return ashford_guardian_version_branch( $version );
+	}
+
+	public static function is_development_version( $version ) {
+		return ashford_guardian_is_development_version( $version );
+	}
+
+	/**
+	 * True when $offered is a newer same-branch (maintenance/security) release.
+	 */
+	public static function is_same_branch_core_update( $current, $offered ) {
+		return ashford_guardian_is_same_branch_core_update( $current, $offered );
+	}
+
+	private function current_wp_version() {
+		if ( function_exists( 'wp_get_wp_version' ) ) {
+			return (string) wp_get_wp_version();
+		}
+		return (string) get_bloginfo( 'version' );
+	}
+
+	/**
+	 * Best same-branch core offer from the update_core transient, if any.
+	 *
+	 * @return object|null
+	 */
+	private function find_same_branch_core_offer() {
+		$updates = get_site_transient( 'update_core' );
+		if ( empty( $updates->updates ) || ! is_array( $updates->updates ) ) {
+			return null;
+		}
+		$current = $this->current_wp_version();
+		$best    = null;
+		foreach ( $updates->updates as $update ) {
+			if ( ! is_object( $update ) ) {
+				continue;
+			}
+			$offered = (string) ( $update->current ?? '' );
+			if ( ! self::is_same_branch_core_update( $current, $offered ) ) {
+				continue;
+			}
+			if ( null === $best || version_compare( $offered, (string) $best->current, '>' ) ) {
+				$best = $update;
+			}
+		}
+		return $best;
+	}
+
+	/**
+	 * Public core status for inventory / UI.
+	 *
+	 * @return array{current:string,offered:string,eligible:bool,block:?array}
+	 */
+	public function get_core_status_public() {
+		$offer   = $this->find_same_branch_core_offer();
+		$blocks  = $this->get_update_blocks();
+		$enabled = ! empty( $this->get_settings()['core_minor_updates'] );
+		return array(
+			'current'  => $this->current_wp_version(),
+			'offered'  => $offer ? (string) ( $offer->current ?? '' ) : '',
+			'eligible' => (bool) ( $offer && $enabled ),
+			'block'    => isset( $blocks[ self::CORE_BLOCK_KEY ] ) ? $blocks[ self::CORE_BLOCK_KEY ] : null,
+		);
 	}
 
 	/**
@@ -323,6 +413,35 @@ final class Ashford_Guardian {
 			return null;
 		}
 		return array( (int) $m[1], (int) ( $m[2] ?? 0 ), (int) ( $m[3] ?? 0 ) );
+	}
+
+	public function filter_allow_minor_core( $allow ) {
+		return ! empty( $this->get_settings()['core_minor_updates'] );
+	}
+
+	public function filter_allow_major_core( $allow ) {
+		return false;
+	}
+
+	/**
+	 * Final core gate: only approve same-branch maintenance/security offers.
+	 * Never force major or development updates via auto_update_core.
+	 */
+	public function decide_core( $update, $item ) {
+		if ( empty( $this->get_settings()['core_minor_updates'] ) ) {
+			return false;
+		}
+		$offered = '';
+		if ( is_object( $item ) ) {
+			$offered = (string) ( $item->current ?? '' );
+			if ( '' === $offered && isset( $item->version ) ) {
+				$offered = (string) $item->version;
+			}
+		}
+		if ( ! self::is_same_branch_core_update( $this->current_wp_version(), $offered ) ) {
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -465,9 +584,10 @@ final class Ashford_Guardian {
 	 * Record or refresh a blocked/failed update. Resets notified when reason
 	 * or target version changes so a new digest can fire.
 	 *
+	 * @param array $extra Optional extras (e.g. kind => core|plugin).
 	 * @return bool True when a new/changed issue was stored.
 	 */
-	private function record_update_block( $slug, $reason, $message, $version = '', $name = '' ) {
+	private function record_update_block( $slug, $reason, $message, $version = '', $name = '', $extra = array() ) {
 		$slug    = (string) $slug;
 		$reason  = (string) $reason;
 		$version = (string) $version;
@@ -482,11 +602,14 @@ final class Ashford_Guardian {
 			return false;
 		}
 
+		$kind = isset( $extra['kind'] ) ? (string) $extra['kind'] : ( self::CORE_BLOCK_KEY === $slug ? 'core' : 'plugin' );
+
 		$entry = array(
 			'reason'   => $reason,
 			'message'  => (string) $message,
 			'version'  => $version,
 			'name'     => $name ? (string) $name : (string) ( $existing['name'] ?? $slug ),
+			'kind'     => $kind,
 			'since'    => time(),
 			'notified' => 0,
 		);
@@ -555,6 +678,9 @@ final class Ashford_Guardian {
 		}
 
 		foreach ( $this->get_update_blocks() as $slug => $block ) {
+			if ( self::CORE_BLOCK_KEY === $slug ) {
+				continue;
+			}
 			if ( 'license' === ( $block['reason'] ?? '' ) && ! isset( $updates[ $slug ] ) ) {
 				$this->clear_update_block( $slug );
 			}
@@ -562,9 +688,167 @@ final class Ashford_Guardian {
 	}
 
 	/**
+	 * Detect host/platform restrictions that prevent unattended core updates.
+	 *
+	 * @param object|null $offer Same-branch core offer, if any.
+	 * @return array{reason:string,message:string}|null
+	 */
+	private function core_preflight_block_reason( $offer = null ) {
+		if ( ! class_exists( 'WP_Automatic_Updater' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+		}
+		if ( ! class_exists( 'Automatic_Upgrader_Skin' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+		}
+
+		$updater = new WP_Automatic_Updater();
+		if ( $updater->is_disabled() ) {
+			$message = 'WordPress automatic updater is disabled.';
+			if ( defined( 'DISALLOW_FILE_MODS' ) && DISALLOW_FILE_MODS ) {
+				$message = 'File modifications are disabled (DISALLOW_FILE_MODS); core cannot auto-update.';
+			} elseif ( defined( 'AUTOMATIC_UPDATER_DISABLED' ) && AUTOMATIC_UPDATER_DISABLED ) {
+				$message = 'Automatic updater is disabled (AUTOMATIC_UPDATER_DISABLED).';
+			}
+			return array(
+				'reason'  => 'disabled',
+				'message' => $message,
+			);
+		}
+
+		if ( method_exists( $updater, 'is_vcs_checkout' ) && $updater->is_vcs_checkout( ABSPATH ) ) {
+			return array(
+				'reason'  => 'vcs',
+				'message' => 'WordPress appears to be a version-control checkout; automatic core updates are blocked.',
+			);
+		}
+
+		$skin           = new Automatic_Upgrader_Skin();
+		$allow_relaxed  = false;
+		if ( is_object( $offer ) && isset( $offer->new_files ) && ! $offer->new_files ) {
+			$allow_relaxed = true;
+		}
+		if ( ! $skin->request_filesystem_credentials( false, ABSPATH, $allow_relaxed ) ) {
+			return array(
+				'reason'  => 'filesystem',
+				'message' => 'WordPress cannot write files for an unattended core update.',
+			);
+		}
+
+		if ( is_object( $offer ) ) {
+			global $wpdb;
+			$php_ok = version_compare( PHP_VERSION, (string) ( $offer->php_version ?? '0' ), '>=' );
+			$mysql_ok = true;
+			if ( ! empty( $offer->mysql_version ) ) {
+				if ( ! ( file_exists( WP_CONTENT_DIR . '/db.php' ) && empty( $wpdb->is_mysql ) ) ) {
+					$mysql_ok = version_compare( $wpdb->db_version(), (string) $offer->mysql_version, '>=' );
+				}
+			}
+			if ( ! $php_ok || ! $mysql_ok ) {
+				return array(
+					'reason'  => 'compat',
+					'message' => 'Server PHP/MySQL does not meet the requirements for this WordPress update.',
+				);
+			}
+		}
+
+		$failed = get_site_option( 'auto_core_update_failed' );
+		if ( is_array( $failed ) && ! empty( $failed['critical'] ) ) {
+			return array(
+				'reason'  => 'failed',
+				'message' => 'A previous critical core update failure is blocking automatic updates.',
+			);
+		}
+
+		return null;
+	}
+
+	/**
+	 * Record or clear WordPress core blocked/pending state for an eligible offer.
+	 *
+	 * @param object|null $offer From find_same_branch_core_offer().
+	 */
+	private function sync_core_update_state( $offer = null ) {
+		if ( null === $offer ) {
+			$offer = $this->find_same_branch_core_offer();
+		}
+
+		$blocks  = $this->get_update_blocks();
+		$current = $this->current_wp_version();
+
+		if ( empty( $this->get_settings()['core_minor_updates'] ) ) {
+			if ( isset( $blocks[ self::CORE_BLOCK_KEY ] ) && 'failed' !== ( $blocks[ self::CORE_BLOCK_KEY ]['reason'] ?? '' ) ) {
+				$this->clear_update_block( self::CORE_BLOCK_KEY );
+			}
+			return;
+		}
+
+		if ( ! $offer ) {
+			if ( isset( $blocks[ self::CORE_BLOCK_KEY ] ) ) {
+				$block = $blocks[ self::CORE_BLOCK_KEY ];
+				$target = (string) ( $block['version'] ?? '' );
+				if ( 'failed' === ( $block['reason'] ?? '' ) && $target && version_compare( $current, $target, '>=' ) ) {
+					$this->clear_update_block( self::CORE_BLOCK_KEY );
+				} elseif ( 'failed' !== ( $block['reason'] ?? '' ) ) {
+					$this->clear_update_block( self::CORE_BLOCK_KEY );
+				}
+			}
+			return;
+		}
+
+		$offered  = (string) ( $offer->current ?? '' );
+		$preflight = $this->core_preflight_block_reason( $offer );
+		if ( $preflight ) {
+			$this->record_update_block(
+				self::CORE_BLOCK_KEY,
+				$preflight['reason'],
+				$preflight['message'],
+				$offered,
+				'WordPress',
+				array( 'kind' => 'core' )
+			);
+			return;
+		}
+
+		if ( isset( $blocks[ self::CORE_BLOCK_KEY ] ) && 'failed' !== ( $blocks[ self::CORE_BLOCK_KEY ]['reason'] ?? '' ) ) {
+			$this->clear_update_block( self::CORE_BLOCK_KEY );
+		}
+	}
+
+	/**
 	 * @param array|mixed $results From WP_Automatic_Updater::$update_results.
 	 */
 	private function record_auto_update_failures( $results ) {
+		if ( ! empty( $results['core'] ) && is_array( $results['core'] ) ) {
+			foreach ( $results['core'] as $row ) {
+				$row    = (object) $row;
+				$item   = isset( $row->item ) ? $row->item : null;
+				$version = is_object( $item ) ? (string) ( $item->current ?? '' ) : '';
+				$result  = $row->result ?? null;
+
+				$success = ! is_wp_error( $result ) && ashford_guardian_core_result_is_success( $result );
+				if ( $success ) {
+					$this->clear_update_block( self::CORE_BLOCK_KEY );
+					$this->log( 'updated', sprintf( 'Updated: WordPress%s.', $version ? ' → ' . $version : '' ) );
+					$queue   = get_option( self::OPT_NOTIFY_Q, array() );
+					$queue[] = 'wordpress' . ( $version ? ' → ' . $version : '' );
+					update_option( self::OPT_NOTIFY_Q, array_unique( $queue ), false );
+					continue;
+				}
+
+				$message = is_wp_error( $result )
+					? $result->get_error_message()
+					: 'Automatic core update failed.';
+				$this->record_update_block(
+					self::CORE_BLOCK_KEY,
+					'failed',
+					$message,
+					$version,
+					'WordPress',
+					array( 'kind' => 'core' )
+				);
+			}
+		}
+
 		if ( empty( $results['plugin'] ) || ! is_array( $results['plugin'] ) ) {
 			return;
 		}
@@ -604,7 +888,7 @@ final class Ashford_Guardian {
 			$version = is_object( $item ) ? (string) ( $item->new_version ?? '' ) : '';
 			$name    = (string) ( $row->name ?? ( $installed[ $file ]['Name'] ?? $slug ) );
 
-			$this->record_update_block( $slug, 'failed', $message, $version, $name );
+			$this->record_update_block( $slug, 'failed', $message, $version, $name, array( 'kind' => 'plugin' ) );
 		}
 	}
 
@@ -632,7 +916,7 @@ final class Ashford_Guardian {
 		$lines = array();
 		foreach ( $fresh as $slug => $block ) {
 			$label   = ! empty( $block['name'] ) ? $block['name'] : $slug;
-			$reason  = 'license' === ( $block['reason'] ?? '' ) ? 'license' : 'failed';
+			$reason  = (string) ( $block['reason'] ?? 'failed' );
 			$version = ! empty( $block['version'] ) ? ' → ' . $block['version'] : '';
 			$lines[] = sprintf(
 				'- %s (%s)%s: %s',
@@ -645,8 +929,8 @@ final class Ashford_Guardian {
 
 		wp_mail(
 			get_option( 'admin_email' ),
-			sprintf( '[%s] Guardian: %d plugin update(s) blocked', $host, count( $fresh ) ),
-			"Ashford Guardian could not apply these plugin updates:\n\n"
+			sprintf( '[%s] Guardian: %d update(s) blocked', $host, count( $fresh ) ),
+			"Ashford Guardian could not apply these updates:\n\n"
 			. implode( "\n", $lines )
 			. "\n\nSite: " . home_url()
 			. "\nTime: " . current_time( 'mysql' )
@@ -686,7 +970,18 @@ final class Ashford_Guardian {
 	}
 
 	public function log_completed_updates( $upgrader, $hook_extra ) {
-		if ( ( $hook_extra['type'] ?? '' ) !== 'plugin' ) {
+		$type = $hook_extra['type'] ?? '';
+		if ( 'core' === $type ) {
+			$to = $this->current_wp_version();
+			$this->log( 'updated', sprintf( 'Updated: WordPress → %s.', $to ) );
+			$this->clear_update_block( self::CORE_BLOCK_KEY );
+			$queue   = get_option( self::OPT_NOTIFY_Q, array() );
+			$queue[] = 'wordpress → ' . $to;
+			update_option( self::OPT_NOTIFY_Q, array_unique( $queue ), false );
+			return;
+		}
+
+		if ( 'plugin' !== $type ) {
 			return;
 		}
 		$plugins = array();
@@ -733,7 +1028,7 @@ final class Ashford_Guardian {
 		}
 		wp_mail(
 			get_option( 'admin_email' ),
-			sprintf( '[%s] Guardian auto-updated %d plugin(s)', wp_parse_url( home_url(), PHP_URL_HOST ), count( $queue ) ),
+			sprintf( '[%s] Guardian auto-updated %d item(s)', wp_parse_url( home_url(), PHP_URL_HOST ), count( $queue ) ),
 			"Ashford Guardian applied updates per policy:\n\n- " . implode( "\n- ", $queue ) . "\n\nSite: " . home_url() . "\nTime: " . current_time( 'mysql' ) . "\nLog: " . admin_url( 'tools.php?page=ashford-guardian' )
 		);
 	}
@@ -886,13 +1181,14 @@ final class Ashford_Guardian {
 			wp_die( 'Not allowed.' );
 		}
 		$settings = array(
-			'patch_delay_days' => max( 0, (int) ( $_POST['ag_patch_delay'] ?? 0 ) ),
-			'minor_delay_days' => max( 0, (int) ( $_POST['ag_minor_delay'] ?? 3 ) ),
-			'allow_major'      => empty( $_POST['ag_allow_major'] ) ? 0 : 1,
-			'major_delay_days' => max( 0, (int) ( $_POST['ag_major_delay'] ?? 7 ) ),
-			'security_fast'    => empty( $_POST['ag_security_fast'] ) ? 0 : 1,
-			'email_notify'     => empty( $_POST['ag_email_notify'] ) ? 0 : 1,
-			'denylist'         => sanitize_textarea_field( wp_unslash( $_POST['ag_denylist'] ?? '' ) ),
+			'patch_delay_days'   => max( 0, (int) ( $_POST['ag_patch_delay'] ?? 0 ) ),
+			'minor_delay_days'   => max( 0, (int) ( $_POST['ag_minor_delay'] ?? 3 ) ),
+			'allow_major'        => empty( $_POST['ag_allow_major'] ) ? 0 : 1,
+			'major_delay_days'   => max( 0, (int) ( $_POST['ag_major_delay'] ?? 7 ) ),
+			'security_fast'      => empty( $_POST['ag_security_fast'] ) ? 0 : 1,
+			'core_minor_updates' => empty( $_POST['ag_core_minor_updates'] ) ? 0 : 1,
+			'email_notify'       => empty( $_POST['ag_email_notify'] ) ? 0 : 1,
+			'denylist'           => sanitize_textarea_field( wp_unslash( $_POST['ag_denylist'] ?? '' ) ),
 		);
 		update_option( self::OPT_SETTINGS, $settings );
 		wp_safe_redirect( admin_url( 'tools.php?page=ashford-guardian&saved=1' ) );
@@ -900,10 +1196,11 @@ final class Ashford_Guardian {
 	}
 
 	public function render_admin_page() {
-		$s       = $this->get_settings();
-		$pending = $this->get_pending_updates();
-		$blocks  = $this->get_update_blocks();
-		$log     = array_reverse( get_option( self::OPT_LOG, array() ) );
+		$s           = $this->get_settings();
+		$pending     = $this->get_pending_updates();
+		$blocks      = $this->get_update_blocks();
+		$core_status = $this->get_core_status_public();
+		$log         = array_reverse( get_option( self::OPT_LOG, array() ) );
 
 		$evaluated = array();
 		$counts    = array(
@@ -933,9 +1230,34 @@ final class Ashford_Guardian {
 			}
 		}
 
+		$core_row = null;
+		if ( ! empty( $core_status['eligible'] ) ) {
+			$counts['pending']++;
+			$core_blocked = ! empty( $core_status['block'] );
+			$core_row     = array(
+				'current'  => $core_status['current'],
+				'offered'  => $core_status['offered'],
+				'blocked'  => $core_blocked,
+				'decision' => $core_blocked
+					? (string) ( $core_status['block']['message'] ?? 'Core update blocked.' )
+					: 'Maintenance/security release — updating now',
+				'status'   => $core_blocked ? 'block' : 'due',
+			);
+			if ( ! $core_blocked ) {
+				$counts['due']++;
+			}
+		}
+
 		// Failed (or license) issues no longer advertised in update_plugins.
+		// Keep the WordPress core block visible even when an offer still exists.
 		$orphan_blocks = array();
 		foreach ( $blocks as $slug => $block ) {
+			if ( self::CORE_BLOCK_KEY === $slug ) {
+				if ( empty( $core_status['eligible'] ) ) {
+					$orphan_blocks[ $slug ] = $block;
+				}
+				continue;
+			}
 			if ( ! isset( $pending[ $slug ] ) ) {
 				$orphan_blocks[ $slug ] = $block;
 			}
@@ -945,11 +1267,12 @@ final class Ashford_Guardian {
 			? sprintf( 'auto after %d day(s)', (int) $s['major_delay_days'] )
 			: 'manual';
 		$summary     = sprintf(
-			'Patch after %d day(s) · minor after %d day(s) · majors %s%s',
+			'Patch after %d day(s) · minor after %d day(s) · majors %s%s%s',
 			(int) $s['patch_delay_days'],
 			(int) $s['minor_delay_days'],
 			$major_label,
-			$s['security_fast'] ? ' · security fast-tracked' : ''
+			$s['security_fast'] ? ' · security fast-tracked' : '',
+			! empty( $s['core_minor_updates'] ) ? ' · WP core maintenance/security on' : ''
 		);
 
 		$check_url = wp_nonce_url( admin_url( 'admin-post.php?action=ag_check_updates' ), 'ag_check_updates' );
@@ -1005,12 +1328,33 @@ final class Ashford_Guardian {
 					<h2 class="ag-section__title">Updates</h2>
 				</div>
 				<div class="ag-updates">
-					<?php if ( empty( $pending ) ) : ?>
+					<?php if ( empty( $pending ) && empty( $core_row ) ) : ?>
 						<div class="ag-empty">
 							<p class="ag-empty__title">All clear</p>
-							<p class="ag-empty__text">No plugin updates waiting. Check again anytime.</p>
+							<p class="ag-empty__text">No plugin or WordPress core updates waiting. Check again anytime.</p>
 						</div>
 					<?php else : ?>
+						<?php if ( $core_row ) :
+							$core_decision_class = 'ag-update__decision--' . ( 'block' === $core_row['status'] ? 'block' : $core_row['status'] );
+							?>
+							<article class="ag-update">
+								<div>
+									<p class="ag-update__name">WordPress</p>
+									<p class="ag-update__slug">wordpress · core</p>
+								</div>
+								<div class="ag-update__versions">
+									<?php echo esc_html( $core_row['current'] ); ?>
+									→ <strong><?php echo esc_html( $core_row['offered'] ); ?></strong>
+								</div>
+								<div class="ag-update__meta">
+									<span class="ag-chip ag-chip--core">core</span>
+									<span class="ag-chip ag-chip--security">security/maintenance</span>
+								</div>
+								<div class="ag-update__decision <?php echo esc_attr( $core_decision_class ); ?>">
+									<?php echo esc_html( $core_row['decision'] ); ?>
+								</div>
+							</article>
+						<?php endif; ?>
 						<?php foreach ( $pending as $slug => $info ) :
 							$ev = $evaluated[ $slug ];
 							$decision_class = 'ag-update__decision--' . ( 'block' === $ev['status'] ? 'block' : $ev['status'] );
@@ -1047,7 +1391,7 @@ final class Ashford_Guardian {
 					</div>
 					<div class="ag-updates ag-updates--blocked">
 						<?php foreach ( $orphan_blocks as $slug => $block ) :
-							$reason_label = 'license' === ( $block['reason'] ?? '' ) ? 'license' : 'failed';
+							$reason_label = (string) ( $block['reason'] ?? 'failed' );
 							$since        = ! empty( $block['since'] ) ? human_time_diff( (int) $block['since'] ) . ' ago' : '';
 							?>
 							<article class="ag-update">
@@ -1127,6 +1471,19 @@ final class Ashford_Guardian {
 							<label class="ag-check">
 								<input type="checkbox" name="ag_security_fast" value="1" <?php checked( $s['security_fast'], 1 ); ?> />
 								<span>Skip the delay when the changelog mentions a security fix (patch and minor only)</span>
+							</label>
+						</div>
+					</div>
+
+					<div class="ag-field">
+						<div class="ag-field__label">
+							WordPress core
+							<span class="ag-field__hint">Same-branch releases only</span>
+						</div>
+						<div class="ag-field__control">
+							<label class="ag-check">
+								<input type="checkbox" name="ag_core_minor_updates" value="1" <?php checked( $s['core_minor_updates'], 1 ); ?> />
+								<span>Automatically apply WordPress maintenance and security releases; never major releases</span>
 							</label>
 						</div>
 					</div>

@@ -1,10 +1,10 @@
-# Ashford Guardian 2.1
+# Ashford Guardian 2.2
 
-Self-contained smart auto-updates for WordPress plugins, with an optional connection to a **Guardian Hub** for fleet-wide visibility. The auto-update policy engine needs no external service and keeps working unchanged if the hub is never configured or goes offline — hub down means no visibility, never no protection.
+Self-contained smart auto-updates for WordPress plugins and same-branch WordPress core, with an optional connection to a **Guardian Hub** for fleet-wide visibility. The auto-update policy engine needs no external service and keeps working unchanged if the hub is never configured or goes offline — hub down means no visibility, never no protection.
 
 ## The policy engine
 
-Every hour (WP-Cron), Guardian refreshes update data and lets WordPress core run auto-updates — but Guardian decides what's approved:
+Every hour (WP-Cron), Guardian refreshes update data and lets WordPress run auto-updates — but Guardian decides what's approved:
 
 | Release type | Default behavior |
 |---|---|
@@ -12,6 +12,7 @@ Every hour (WP-Cron), Guardian refreshes update data and lets WordPress core run
 | Minor (x.**Y**.z) | Apply after 3-day safety delay |
 | Major (**X**.y.z) | Manual only (optional auto after 7 days) |
 | Security-flagged changelog | Fast-tracked — delay skipped (patch/minor) |
+| WordPress core (same branch) | Apply maintenance/security immediately; never major |
 | Denylisted slug | Never touched, hard block |
 
 Security detection = keyword scan of the release's wordpress.org changelog entry and the update's upgrade notice ("security", "XSS", "CVE", "SQL injection", etc.). Data every WP site already consumes — no new vendors.
@@ -34,7 +35,8 @@ Zip → ManageWP bulk install → activate. Policy defaults are sane; tune under
 
 ## Notes
 
-- Premium plugins update only if their license/updater is active; Guardian approves, their updater supplies the package.
+- Premium plugins update only if their license/updater is active; Guardian approves, their updater supplies the package. Empty download packages and failed auto-updates are tagged and emailed once.
+- WordPress core: Guardian forces same-branch maintenance/security updates and blocks major/dev auto-updates. Host locks (`DISALLOW_FILE_MODS`, disabled updater, VCS checkout) are reported as blocked rather than bypassed.
 - Reliable timing needs working cron. For maintenance clients: real server cron hitting wp-cron.php every 15 min.
 - Non-semver plugins (date-based versions etc.) classify as "unrecognized" and are left manual.
 

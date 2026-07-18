@@ -4,10 +4,10 @@ Tags: updates, auto-update, maintenance, security, monitoring
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.1.1
+Stable tag: 2.2.0
 License: GPL-2.0+
 
-Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans.
+Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. WordPress same-branch maintenance/security releases are applied automatically.
 
 == Description ==
 
@@ -19,6 +19,7 @@ Ashford Guardian decides which plugin updates WordPress may auto-apply:
 * Security-flagged changelog — fast-tracked (delay skipped for patch/minor)
 * Denylisted slug — never touched
 * License-blocked or failed auto-updates — tagged in the UI and emailed once per issue
+* WordPress core same-branch maintenance/security releases — applied automatically; majors never
 
 Configure policy under Tools → Guardian. Activity is logged for client reporting.
 
@@ -32,6 +33,10 @@ Optionally, pair the site with a **Guardian Hub** for centralized fleet visibili
 4. Optionally pair with a Guardian Hub under Tools → Guardian → Guardian Hub (enter the hub URL, pair, then paste the API key once the operator approves the site).
 
 == Changelog ==
+
+= 2.2.0 =
+* Automatically apply WordPress same-branch maintenance/security releases (never major or development).
+* Surface pending/blocked core updates in Tools → Guardian, email once when core cannot update, and report core blocked/pending state to the hub.
 
 = 2.1.1 =
 * Detect premium updates with no download package (typical expired license) and auto-update failures.

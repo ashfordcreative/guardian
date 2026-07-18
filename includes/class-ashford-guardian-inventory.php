@@ -31,18 +31,40 @@ final class Ashford_Guardian_Inventory {
 	}
 
 	private static function core_component() {
-		$updates = get_core_updates();
-		$state   = 'current';
-		if ( is_array( $updates ) && ! empty( $updates ) && isset( $updates[0]->response ) && 'latest' !== $updates[0]->response ) {
-			$state = 'pending';
+		$status = Ashford_Guardian::instance()->get_core_status_public();
+		$state  = 'current';
+		$meta   = array();
+
+		if ( ! empty( $status['block'] ) ) {
+			$state                 = 'blocked';
+			$meta['block_reason']  = $status['block']['reason'] ?? 'failed';
+			$meta['block_message'] = $status['block']['message'] ?? '';
+			if ( ! empty( $status['block']['version'] ) ) {
+				$meta['target_version'] = $status['block']['version'];
+			} elseif ( ! empty( $status['offered'] ) ) {
+				$meta['target_version'] = $status['offered'];
+			}
+		} elseif ( ! empty( $status['eligible'] ) ) {
+			$state                  = 'pending';
+			$meta['target_version'] = $status['offered'];
+			$meta['decision']       = 'Maintenance/security release — updating now';
+		} else {
+			$updates = get_core_updates();
+			if ( is_array( $updates ) && ! empty( $updates ) && isset( $updates[0]->response ) && 'latest' !== $updates[0]->response ) {
+				// Major/dev offer exists but Guardian will not auto-apply it.
+				$state = 'pending';
+				$meta['target_version'] = $updates[0]->version ?? ( $updates[0]->current ?? '' );
+				$meta['decision']       = 'Major/dev core release — manual';
+			}
 		}
+
 		return array(
 			'kind'    => 'core',
 			'name'    => 'WordPress',
 			'slug'    => 'wordpress',
-			'version' => get_bloginfo( 'version' ),
+			'version' => $status['current'] ?: get_bloginfo( 'version' ),
 			'state'   => $state,
-			'meta'    => array(),
+			'meta'    => $meta,
 		);
 	}
 
