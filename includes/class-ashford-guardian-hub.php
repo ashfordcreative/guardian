@@ -68,7 +68,7 @@ final class Ashford_Guardian_Hub {
 	}
 
 	public static function activate() {
-		Ashford_Guardian_Event_Queue::install();
+		Ashford_Guardian_Schema::migrate();
 	}
 
 	public function register_cron_schedule( $schedules ) {

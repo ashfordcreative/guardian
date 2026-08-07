@@ -3,7 +3,7 @@
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
  * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. Policy keeps working even if the hub is unreachable.
- * Version:           2.2.0
+ * Version:           2.3.0
  * Author:            Ashford Creative
  * License:           GPL-2.0+
  * Requires at least: 6.0
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ASH_GUARDIAN_VERSION', '2.2.0' );
+define( 'ASH_GUARDIAN_VERSION', '2.3.0' );
 define( 'ASH_GUARDIAN_FILE', __FILE__ );
 define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -28,6 +28,7 @@ define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
 foreach (
 	array(
 		'ashford-guardian-core-version.php',
+		'class-ashford-guardian-schema.php',
 		'class-ashford-guardian-crypto.php',
 		'class-ashford-guardian-hub-settings.php',
 		'class-ashford-guardian-event-queue.php',
@@ -41,6 +42,10 @@ foreach (
 ) {
 	require_once ASH_GUARDIAN_DIR . 'includes/' . $ash_guardian_include;
 }
+
+// Version-gated queue schema: migrate on load so in-place upgrades self-heal
+// without requiring reactivation. Priority 5 so it runs before tick/queue work.
+add_action( 'plugins_loaded', array( 'Ashford_Guardian_Schema', 'maybe_migrate' ), 5 );
 
 /*
  * GitHub-powered updates.
@@ -168,6 +173,7 @@ final class Ashford_Guardian {
 	/* ------------------------------------------------------------------ */
 
 	public function activate() {
+		Ashford_Guardian_Schema::migrate();
 		if ( ! wp_next_scheduled( self::CRON_HOOK ) ) {
 			wp_schedule_event( time() + wp_rand( 120, 3000 ), 'hourly', self::CRON_HOOK );
 		}
@@ -182,6 +188,10 @@ final class Ashford_Guardian {
 	/* ------------------------------------------------------------------ */
 
 	public function tick() {
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
+			return;
+		}
+
 		$this->refresh_and_observe();
 
 		// Hand off to core. Our decide() filter approves or holds each one.

@@ -23,30 +23,11 @@ final class Ashford_Guardian_Event_Queue {
 		return $wpdb->prefix . 'ashford_guardian_queue';
 	}
 
+	/**
+	 * @deprecated 2.3.0 Use Ashford_Guardian_Schema::migrate() — kept as a thin wrapper.
+	 */
 	public static function install() {
-		global $wpdb;
-		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-
-		$table           = self::table();
-		$charset_collate = $wpdb->get_charset_collate();
-
-		$sql = "CREATE TABLE {$table} (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			event_id VARCHAR(80) NOT NULL,
-			event_type VARCHAR(80) NOT NULL DEFAULT '',
-			severity VARCHAR(20) NOT NULL DEFAULT 'info',
-			payload LONGTEXT NOT NULL,
-			status VARCHAR(20) NOT NULL DEFAULT 'pending',
-			attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-			next_attempt_at DATETIME NOT NULL,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			PRIMARY KEY  (id),
-			UNIQUE KEY event_id (event_id),
-			KEY status_next_attempt (status, next_attempt_at)
-		) {$charset_collate};";
-
-		dbDelta( $sql );
+		Ashford_Guardian_Schema::migrate();
 	}
 
 	/**
@@ -57,6 +38,9 @@ final class Ashford_Guardian_Event_Queue {
 	public static function enqueue( array $event ) {
 		global $wpdb;
 		if ( empty( $event['id'] ) ) {
+			return false;
+		}
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
 			return false;
 		}
 		$now = current_time( 'mysql', true );
@@ -83,6 +67,9 @@ final class Ashford_Guardian_Event_Queue {
 	 */
 	public static function get_batch( $limit = 25 ) {
 		global $wpdb;
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
+			return array();
+		}
 		$now  = current_time( 'mysql', true );
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
@@ -100,6 +87,9 @@ final class Ashford_Guardian_Event_Queue {
 
 	public static function count_ready( $limit = 500 ) {
 		global $wpdb;
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
+			return 0;
+		}
 		$now = current_time( 'mysql', true );
 		return (int) $wpdb->get_var(
 			$wpdb->prepare(
@@ -119,6 +109,9 @@ final class Ashford_Guardian_Event_Queue {
 		if ( empty( $ids ) ) {
 			return;
 		}
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
+			return;
+		}
 		$placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
 		$wpdb->query(
 			$wpdb->prepare( "DELETE FROM " . self::table() . " WHERE id IN ({$placeholders})", $ids ) // phpcs:ignore
@@ -131,6 +124,9 @@ final class Ashford_Guardian_Event_Queue {
 	 */
 	public static function mark_failed( array $ids ) {
 		global $wpdb;
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
+			return;
+		}
 		foreach ( $ids as $id ) {
 			$attempts = (int) $wpdb->get_var( $wpdb->prepare( "SELECT attempts FROM " . self::table() . " WHERE id = %d", $id ) );
 			$attempts++;
@@ -151,11 +147,17 @@ final class Ashford_Guardian_Event_Queue {
 
 	public static function pending_count() {
 		global $wpdb;
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
+			return 0;
+		}
 		return (int) $wpdb->get_var( "SELECT COUNT(*) FROM " . self::table() ); // phpcs:ignore
 	}
 
 	public static function oldest_pending_age_seconds() {
 		global $wpdb;
+		if ( ! Ashford_Guardian_Schema::assert_healthy() ) {
+			return 0;
+		}
 		$oldest = $wpdb->get_var( "SELECT created_at FROM " . self::table() . " ORDER BY id ASC LIMIT 1" ); // phpcs:ignore
 		if ( ! $oldest ) {
 			return 0;
