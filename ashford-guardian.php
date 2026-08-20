@@ -3,7 +3,7 @@
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
  * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. Policy keeps working even if the hub is unreachable.
- * Version:           2.4.1
+ * Version:           2.4.2
  * Author:            Ashford Creative
  * License:           GPL-2.0+
  * Requires at least: 6.0
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ASH_GUARDIAN_VERSION', '2.4.1' );
+define( 'ASH_GUARDIAN_VERSION', '2.4.2' );
 define( 'ASH_GUARDIAN_FILE', __FILE__ );
 define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
 

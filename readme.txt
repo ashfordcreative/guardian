@@ -4,7 +4,7 @@ Tags: updates, auto-update, maintenance, security, monitoring
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.4.1
+Stable tag: 2.4.2
 License: GPL-2.0+
 
 Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. WordPress same-branch maintenance/security releases are applied automatically.
@@ -33,6 +33,9 @@ Optionally, pair the site with a **Guardian Hub** for centralized fleet visibili
 4. Optionally pair with a Guardian Hub under Tools → Guardian → Guardian Hub (enter the hub URL, pair, then paste the API key once the operator approves the site).
 
 == Changelog ==
+
+= 2.4.2 =
+* Center the Guardian admin layout at 90% width for clearer spacing in wp-admin.
 
 = 2.4.1 =
 * Keep primary button labels white so they stay readable on the blue accent.
