@@ -3,7 +3,7 @@
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
  * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. Policy keeps working even if the hub is unreachable.
- * Version:           2.3.0
+ * Version:           2.4.0
  * Author:            Ashford Creative
  * License:           GPL-2.0+
  * Requires at least: 6.0
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ASH_GUARDIAN_VERSION', '2.3.0' );
+define( 'ASH_GUARDIAN_VERSION', '2.4.0' );
 define( 'ASH_GUARDIAN_FILE', __FILE__ );
 define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -130,6 +130,7 @@ final class Ashford_Guardian {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_admin_assets' ) );
 		add_action( 'admin_post_ag_check_updates', array( $this, 'handle_check_updates' ) );
 		add_action( 'admin_post_ag_run_now', array( $this, 'handle_run_now' ) );
+		add_action( 'admin_post_ag_update_now', array( $this, 'handle_update_now' ) );
 		add_action( 'admin_post_ag_save_settings', array( $this, 'handle_save_settings' ) );
 	}
 
@@ -149,11 +150,20 @@ final class Ashford_Guardian {
 					'security_fast'     => 1,   // changelog says "security" => skip the delay (patch/minor)
 					'core_minor_updates'=> 1,   // same-branch WP maintenance/security releases
 					'email_notify'      => 1,
+					'notify_email'      => '',  // empty = WordPress admin email
 					'denylist'          => '',  // one slug per line, never auto-updated
 				)
 			);
 		}
 		return $this->settings;
+	}
+
+	/**
+	 * Recipient for digests. Falls back to the site admin email when unset/invalid.
+	 */
+	private function get_notify_email() {
+		$email = sanitize_email( (string) ( $this->get_settings()['notify_email'] ?? '' ) );
+		return is_email( $email ) ? $email : get_option( 'admin_email' );
 	}
 
 	private function get_denylist() {
@@ -938,7 +948,7 @@ final class Ashford_Guardian {
 		}
 
 		wp_mail(
-			get_option( 'admin_email' ),
+			$this->get_notify_email(),
 			sprintf( '[%s] Guardian: %d update(s) blocked', $host, count( $fresh ) ),
 			"Ashford Guardian could not apply these updates:\n\n"
 			. implode( "\n", $lines )
@@ -1037,7 +1047,7 @@ final class Ashford_Guardian {
 			return;
 		}
 		wp_mail(
-			get_option( 'admin_email' ),
+			$this->get_notify_email(),
 			sprintf( '[%s] Guardian auto-updated %d item(s)', wp_parse_url( home_url(), PHP_URL_HOST ), count( $queue ) ),
 			"Ashford Guardian applied updates per policy:\n\n- " . implode( "\n- ", $queue ) . "\n\nSite: " . home_url() . "\nTime: " . current_time( 'mysql' ) . "\nLog: " . admin_url( 'tools.php?page=ashford-guardian' )
 		);
@@ -1186,6 +1196,80 @@ final class Ashford_Guardian {
 		exit;
 	}
 
+	/**
+	 * Manually apply one pending plugin or same-branch core update from the admin UI.
+	 */
+	public function handle_update_now() {
+		if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'ag_update_now' ) ) {
+			wp_die( 'Not allowed.' );
+		}
+
+		$redirect = admin_url( 'tools.php?page=ashford-guardian' );
+		$target   = isset( $_GET['target'] ) ? sanitize_text_field( wp_unslash( $_GET['target'] ) ) : '';
+
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+		require_once ABSPATH . 'wp-admin/includes/misc.php';
+		require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+
+		if ( 'core' === $target ) {
+			if ( ! current_user_can( 'update_core' ) ) {
+				wp_die( 'Not allowed.' );
+			}
+			$offer = $this->find_same_branch_core_offer();
+			if ( ! $offer ) {
+				wp_safe_redirect( add_query_arg( 'update_failed', '1', $redirect ) );
+				exit;
+			}
+			$skin     = new Automatic_Upgrader_Skin();
+			$upgrader = new Core_Upgrader( $skin );
+			$result   = $upgrader->upgrade( $offer );
+			if ( is_wp_error( $result ) || false === $result ) {
+				wp_safe_redirect( add_query_arg( 'update_failed', '1', $redirect ) );
+				exit;
+			}
+			$this->clear_update_block( self::CORE_BLOCK_KEY );
+			$this->log( 'updated', sprintf( 'Updated: WordPress → %s (manual).', $this->current_wp_version() ) );
+			wp_safe_redirect( add_query_arg( 'updated', '1', $redirect ) );
+			exit;
+		}
+
+		if ( ! current_user_can( 'update_plugins' ) ) {
+			wp_die( 'Not allowed.' );
+		}
+
+		$plugin = isset( $_GET['plugin'] ) ? plugin_basename( wp_unslash( $_GET['plugin'] ) ) : '';
+		if ( '' === $plugin ) {
+			wp_safe_redirect( add_query_arg( 'update_failed', '1', $redirect ) );
+			exit;
+		}
+
+		$transient = get_site_transient( 'update_plugins' );
+		if ( empty( $transient->response[ $plugin ] ) ) {
+			wp_safe_redirect( add_query_arg( 'update_failed', '1', $redirect ) );
+			exit;
+		}
+		$item = $transient->response[ $plugin ];
+		if ( self::package_is_missing( $item ) ) {
+			wp_safe_redirect( add_query_arg( 'update_failed', '1', $redirect ) );
+			exit;
+		}
+
+		$skin     = new Automatic_Upgrader_Skin();
+		$upgrader = new Plugin_Upgrader( $skin );
+		$result   = $upgrader->upgrade( $plugin );
+
+		if ( is_wp_error( $result ) || false === $result ) {
+			wp_safe_redirect( add_query_arg( 'update_failed', '1', $redirect ) );
+			exit;
+		}
+
+		$slug = $item->slug ?? ( strpos( $plugin, '/' ) !== false ? dirname( $plugin ) : basename( $plugin, '.php' ) );
+		$this->clear_update_block( $slug );
+		$this->log( 'updated', sprintf( 'Updated: %s (manual).', $slug ) );
+		wp_safe_redirect( add_query_arg( 'updated', '1', $redirect ) );
+		exit;
+	}
+
 	public function handle_save_settings() {
 		if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'ag_save_settings' ) ) {
 			wp_die( 'Not allowed.' );
@@ -1198,9 +1282,11 @@ final class Ashford_Guardian {
 			'security_fast'      => empty( $_POST['ag_security_fast'] ) ? 0 : 1,
 			'core_minor_updates' => empty( $_POST['ag_core_minor_updates'] ) ? 0 : 1,
 			'email_notify'       => empty( $_POST['ag_email_notify'] ) ? 0 : 1,
+			'notify_email'       => sanitize_email( wp_unslash( $_POST['ag_notify_email'] ?? '' ) ),
 			'denylist'           => sanitize_textarea_field( wp_unslash( $_POST['ag_denylist'] ?? '' ) ),
 		);
 		update_option( self::OPT_SETTINGS, $settings );
+		$this->settings = null;
 		wp_safe_redirect( admin_url( 'tools.php?page=ashford-guardian&saved=1' ) );
 		exit;
 	}
@@ -1287,10 +1373,12 @@ final class Ashford_Guardian {
 
 		$check_url = wp_nonce_url( admin_url( 'admin-post.php?action=ag_check_updates' ), 'ag_check_updates' );
 		$run_url   = wp_nonce_url( admin_url( 'admin-post.php?action=ag_run_now' ), 'ag_run_now' );
+		$notify_email_value = (string) ( $s['notify_email'] ?? '' );
 		?>
 		<div class="wrap ag-app">
 			<header class="ag-header">
 				<div class="ag-brand">
+					<p class="ag-brand__eyebrow">Ashford Creative</p>
 					<h1 class="ag-brand__mark">Guardian</h1>
 					<p class="ag-brand__summary"><?php echo esc_html( $summary ); ?></p>
 				</div>
@@ -1302,12 +1390,22 @@ final class Ashford_Guardian {
 				</div>
 			</header>
 
+			<nav class="ag-nav" aria-label="Guardian sections">
+				<a class="ag-nav__item ag-nav__item--active" href="#ag-updates">Updates</a>
+				<a class="ag-nav__item" href="#ag-policy">Policy</a>
+				<a class="ag-nav__item" href="#ag-activity">Activity</a>
+			</nav>
+
 			<?php if ( ! empty( $_GET['checked'] ) ) : ?>
 				<div class="ag-notice">Update check complete — pending list refreshed.</div>
 			<?php elseif ( ! empty( $_GET['ran'] ) ) : ?>
 				<div class="ag-notice">Policy run finished — due updates were handed to WordPress.</div>
 			<?php elseif ( ! empty( $_GET['saved'] ) ) : ?>
 				<div class="ag-notice">Policy saved.</div>
+			<?php elseif ( ! empty( $_GET['updated'] ) ) : ?>
+				<div class="ag-notice">Update applied successfully.</div>
+			<?php elseif ( ! empty( $_GET['update_failed'] ) ) : ?>
+				<div class="ag-notice ag-notice--error">Update could not be applied. Check filesystem permissions or the plugin license.</div>
 			<?php endif; ?>
 
 			<div class="ag-status" role="group" aria-label="Update status">
@@ -1333,196 +1431,231 @@ final class Ashford_Guardian {
 				</div>
 			</div>
 
-			<section class="ag-section">
-				<div class="ag-section__head">
-					<h2 class="ag-section__title">Updates</h2>
-				</div>
-				<div class="ag-updates">
-					<?php if ( empty( $pending ) && empty( $core_row ) ) : ?>
-						<div class="ag-empty">
-							<p class="ag-empty__title">All clear</p>
-							<p class="ag-empty__text">No plugin or WordPress core updates waiting. Check again anytime.</p>
-						</div>
-					<?php else : ?>
-						<?php if ( $core_row ) :
-							$core_decision_class = 'ag-update__decision--' . ( 'block' === $core_row['status'] ? 'block' : $core_row['status'] );
-							?>
-							<article class="ag-update">
-								<div>
-									<p class="ag-update__name">WordPress</p>
-									<p class="ag-update__slug">wordpress · core</p>
-								</div>
-								<div class="ag-update__versions">
-									<?php echo esc_html( $core_row['current'] ); ?>
-									→ <strong><?php echo esc_html( $core_row['offered'] ); ?></strong>
-								</div>
-								<div class="ag-update__meta">
-									<span class="ag-chip ag-chip--core">core</span>
-									<span class="ag-chip ag-chip--security">security/maintenance</span>
-								</div>
-								<div class="ag-update__decision <?php echo esc_attr( $core_decision_class ); ?>">
-									<?php echo esc_html( $core_row['decision'] ); ?>
-								</div>
-							</article>
+			<section class="ag-section" id="ag-updates">
+				<div class="ag-card">
+					<div class="ag-card__head">
+						<h2 class="ag-section__title">Updates</h2>
+					</div>
+					<div class="ag-updates">
+						<?php if ( empty( $pending ) && empty( $core_row ) ) : ?>
+							<div class="ag-empty">
+								<p class="ag-empty__title">All clear</p>
+								<p class="ag-empty__text">No plugin or WordPress core updates waiting. Check again anytime.</p>
+							</div>
+						<?php else : ?>
+							<?php if ( $core_row ) :
+								$core_decision_class = 'ag-update__decision--' . ( 'block' === $core_row['status'] ? 'block' : $core_row['status'] );
+								$core_update_url     = wp_nonce_url(
+									admin_url( 'admin-post.php?action=ag_update_now&target=core' ),
+									'ag_update_now'
+								);
+								?>
+								<article class="ag-update">
+									<div class="ag-update__main">
+										<p class="ag-update__name">WordPress</p>
+										<p class="ag-update__slug">wordpress · core</p>
+									</div>
+									<div class="ag-update__versions">
+										<?php echo esc_html( $core_row['current'] ); ?>
+										→ <strong><?php echo esc_html( $core_row['offered'] ); ?></strong>
+									</div>
+									<div class="ag-update__meta">
+										<span class="ag-chip ag-chip--core">core</span>
+										<span class="ag-chip ag-chip--security">security/maintenance</span>
+									</div>
+									<div class="ag-update__aside">
+										<div class="ag-update__decision <?php echo esc_attr( $core_decision_class ); ?>">
+											<?php echo esc_html( $core_row['decision'] ); ?>
+										</div>
+										<?php if ( empty( $core_row['blocked'] ) && current_user_can( 'update_core' ) ) : ?>
+											<a class="ag-btn ag-btn--primary ag-btn--sm" href="<?php echo esc_url( $core_update_url ); ?>">Update now</a>
+										<?php endif; ?>
+									</div>
+								</article>
+							<?php endif; ?>
+							<?php foreach ( $pending as $slug => $info ) :
+								$ev             = $evaluated[ $slug ];
+								$decision_class = 'ag-update__decision--' . ( 'block' === $ev['status'] ? 'block' : $ev['status'] );
+								$can_update     = empty( $ev['is_license'] ) && ! empty( $info['file'] ) && current_user_can( 'update_plugins' );
+								$update_url     = $can_update
+									? wp_nonce_url(
+										admin_url( 'admin-post.php?action=ag_update_now&plugin=' . rawurlencode( $info['file'] ) ),
+										'ag_update_now'
+									)
+									: '';
+								?>
+								<article class="ag-update">
+									<div class="ag-update__main">
+										<p class="ag-update__name"><?php echo esc_html( $info['name'] ); ?></p>
+										<p class="ag-update__slug"><?php echo esc_html( $slug ); ?> · seen <?php echo esc_html( number_format( $ev['age'], 1 ) ); ?>d ago</p>
+									</div>
+									<div class="ag-update__versions">
+										<?php echo esc_html( $info['current'] ); ?>
+										→ <strong><?php echo esc_html( $info['new_version'] ); ?></strong>
+									</div>
+									<div class="ag-update__meta">
+										<span class="ag-chip ag-chip--<?php echo esc_attr( $ev['type'] ); ?>"><?php echo esc_html( $ev['type'] ); ?></span>
+										<?php if ( ! empty( $ev['is_license'] ) ) : ?>
+											<span class="ag-chip ag-chip--license">license</span>
+										<?php endif; ?>
+										<?php if ( $ev['is_sec'] ) : ?>
+											<span class="ag-chip ag-chip--security">security</span>
+										<?php endif; ?>
+									</div>
+									<div class="ag-update__aside">
+										<div class="ag-update__decision <?php echo esc_attr( $decision_class ); ?>">
+											<?php echo esc_html( $ev['decision'] ); ?>
+										</div>
+										<?php if ( $can_update ) : ?>
+											<a class="ag-btn ag-btn--primary ag-btn--sm" href="<?php echo esc_url( $update_url ); ?>">Update now</a>
+										<?php endif; ?>
+									</div>
+								</article>
+							<?php endforeach; ?>
 						<?php endif; ?>
-						<?php foreach ( $pending as $slug => $info ) :
-							$ev = $evaluated[ $slug ];
-							$decision_class = 'ag-update__decision--' . ( 'block' === $ev['status'] ? 'block' : $ev['status'] );
-							?>
-							<article class="ag-update">
-								<div>
-									<p class="ag-update__name"><?php echo esc_html( $info['name'] ); ?></p>
-									<p class="ag-update__slug"><?php echo esc_html( $slug ); ?> · seen <?php echo esc_html( number_format( $ev['age'], 1 ) ); ?>d ago</p>
-								</div>
-								<div class="ag-update__versions">
-									<?php echo esc_html( $info['current'] ); ?>
-									→ <strong><?php echo esc_html( $info['new_version'] ); ?></strong>
-								</div>
-								<div class="ag-update__meta">
-									<span class="ag-chip ag-chip--<?php echo esc_attr( $ev['type'] ); ?>"><?php echo esc_html( $ev['type'] ); ?></span>
-									<?php if ( ! empty( $ev['is_license'] ) ) : ?>
-										<span class="ag-chip ag-chip--license">license</span>
-									<?php endif; ?>
-									<?php if ( $ev['is_sec'] ) : ?>
-										<span class="ag-chip ag-chip--security">security</span>
-									<?php endif; ?>
-								</div>
-								<div class="ag-update__decision <?php echo esc_attr( $decision_class ); ?>">
-									<?php echo esc_html( $ev['decision'] ); ?>
-								</div>
-							</article>
-						<?php endforeach; ?>
+					</div>
+
+					<?php if ( ! empty( $orphan_blocks ) ) : ?>
+						<div class="ag-card__subhead">
+							<h3 class="ag-section__title">Blocked updates</h3>
+						</div>
+						<div class="ag-updates ag-updates--blocked">
+							<?php foreach ( $orphan_blocks as $slug => $block ) :
+								$reason_label = (string) ( $block['reason'] ?? 'failed' );
+								$since        = ! empty( $block['since'] ) ? human_time_diff( (int) $block['since'] ) . ' ago' : '';
+								?>
+								<article class="ag-update">
+									<div class="ag-update__main">
+										<p class="ag-update__name"><?php echo esc_html( $block['name'] ?? $slug ); ?></p>
+										<p class="ag-update__slug"><?php echo esc_html( $slug ); ?><?php echo $since ? ' · ' . esc_html( $since ) : ''; ?></p>
+									</div>
+									<div class="ag-update__versions">
+										<?php if ( ! empty( $block['version'] ) ) : ?>
+											→ <strong><?php echo esc_html( $block['version'] ); ?></strong>
+										<?php else : ?>
+											—
+										<?php endif; ?>
+									</div>
+									<div class="ag-update__meta">
+										<span class="ag-chip ag-chip--<?php echo esc_attr( $reason_label ); ?>"><?php echo esc_html( $reason_label ); ?></span>
+									</div>
+									<div class="ag-update__aside">
+										<div class="ag-update__decision ag-update__decision--block">
+											<?php echo esc_html( $block['message'] ?? 'Update blocked.' ); ?>
+										</div>
+									</div>
+								</article>
+							<?php endforeach; ?>
+						</div>
 					<?php endif; ?>
 				</div>
-
-				<?php if ( ! empty( $orphan_blocks ) ) : ?>
-					<div class="ag-section__head" style="margin-top:16px">
-						<h3 class="ag-section__title">Blocked updates</h3>
-					</div>
-					<div class="ag-updates ag-updates--blocked">
-						<?php foreach ( $orphan_blocks as $slug => $block ) :
-							$reason_label = (string) ( $block['reason'] ?? 'failed' );
-							$since        = ! empty( $block['since'] ) ? human_time_diff( (int) $block['since'] ) . ' ago' : '';
-							?>
-							<article class="ag-update">
-								<div>
-									<p class="ag-update__name"><?php echo esc_html( $block['name'] ?? $slug ); ?></p>
-									<p class="ag-update__slug"><?php echo esc_html( $slug ); ?><?php echo $since ? ' · ' . esc_html( $since ) : ''; ?></p>
-								</div>
-								<div class="ag-update__versions">
-									<?php if ( ! empty( $block['version'] ) ) : ?>
-										→ <strong><?php echo esc_html( $block['version'] ); ?></strong>
-									<?php else : ?>
-										—
-									<?php endif; ?>
-								</div>
-								<div class="ag-update__meta">
-									<span class="ag-chip ag-chip--<?php echo esc_attr( $reason_label ); ?>"><?php echo esc_html( $reason_label ); ?></span>
-								</div>
-								<div class="ag-update__decision ag-update__decision--block">
-									<?php echo esc_html( $block['message'] ?? 'Update blocked.' ); ?>
-								</div>
-							</article>
-						<?php endforeach; ?>
-					</div>
-				<?php endif; ?>
 			</section>
 
-			<section class="ag-section">
-				<div class="ag-section__head">
-					<h2 class="ag-section__title">Policy</h2>
+			<section class="ag-section" id="ag-policy">
+				<div class="ag-card">
+					<div class="ag-card__head">
+						<h2 class="ag-section__title">Policy</h2>
+					</div>
+					<form class="ag-policy" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+						<?php wp_nonce_field( 'ag_save_settings' ); ?>
+						<input type="hidden" name="action" value="ag_save_settings" />
+
+						<div class="ag-field">
+							<div class="ag-field__label">
+								Patch releases
+								<span class="ag-field__hint">x.y.Z bumps</span>
+							</div>
+							<div class="ag-field__control">
+								Apply after
+								<input class="ag-input ag-input--num" type="number" name="ag_patch_delay" min="0" max="30" value="<?php echo (int) $s['patch_delay_days']; ?>" />
+								day(s). <span class="ag-field__hint" style="display:inline;margin:0">0 = immediately</span>
+							</div>
+						</div>
+
+						<div class="ag-field">
+							<div class="ag-field__label">
+								Minor releases
+								<span class="ag-field__hint">x.Y.z bumps</span>
+							</div>
+							<div class="ag-field__control">
+								Apply after
+								<input class="ag-input ag-input--num" type="number" name="ag_minor_delay" min="0" max="30" value="<?php echo (int) $s['minor_delay_days']; ?>" />
+								day(s)
+							</div>
+						</div>
+
+						<div class="ag-field">
+							<div class="ag-field__label">
+								Major releases
+								<span class="ag-field__hint">X.y.z bumps</span>
+							</div>
+							<div class="ag-field__control">
+								<label class="ag-check">
+									<input type="checkbox" name="ag_allow_major" value="1" <?php checked( $s['allow_major'], 1 ); ?> />
+									<span>Auto-apply after</span>
+								</label>
+								<input class="ag-input ag-input--num" type="number" name="ag_major_delay" min="0" max="60" value="<?php echo (int) $s['major_delay_days']; ?>" />
+								day(s). Off = always manual.
+							</div>
+						</div>
+
+						<div class="ag-field">
+							<div class="ag-field__label">Security fast-track</div>
+							<div class="ag-field__control">
+								<label class="ag-check">
+									<input type="checkbox" name="ag_security_fast" value="1" <?php checked( $s['security_fast'], 1 ); ?> />
+									<span>Skip the delay when the changelog mentions a security fix (patch and minor only)</span>
+								</label>
+							</div>
+						</div>
+
+						<div class="ag-field">
+							<div class="ag-field__label">
+								WordPress core
+								<span class="ag-field__hint">Same-branch releases only</span>
+							</div>
+							<div class="ag-field__control">
+								<label class="ag-check">
+									<input type="checkbox" name="ag_core_minor_updates" value="1" <?php checked( $s['core_minor_updates'], 1 ); ?> />
+									<span>Automatically apply WordPress maintenance and security releases; never major releases</span>
+								</label>
+							</div>
+						</div>
+
+						<div class="ag-field">
+							<div class="ag-field__label">
+								Never auto-update
+								<span class="ag-field__hint">One slug per line</span>
+							</div>
+							<div class="ag-field__control ag-field__control--stack">
+								<textarea class="ag-textarea" id="ag_denylist" name="ag_denylist" rows="4"><?php echo esc_textarea( $s['denylist'] ); ?></textarea>
+								<span class="ag-field__hint">Hard block — overrides everything, including auto-updates enabled elsewhere.</span>
+							</div>
+						</div>
+
+						<div class="ag-field">
+							<div class="ag-field__label">
+								Email notifications
+								<span class="ag-field__hint">Applied and blocked digests</span>
+							</div>
+							<div class="ag-field__control ag-field__control--stack">
+								<label class="ag-check">
+									<input type="checkbox" name="ag_email_notify" value="1" <?php checked( $s['email_notify'], 1 ); ?> />
+									<span>Send email notifications</span>
+								</label>
+								<label class="ag-field__email">
+									<span class="ag-field__hint" style="margin:0 0 4px">Notify email</span>
+									<input class="ag-input ag-input--email" type="email" name="ag_notify_email" value="<?php echo esc_attr( $notify_email_value ); ?>" placeholder="<?php echo esc_attr( get_option( 'admin_email' ) ); ?>" />
+								</label>
+								<span class="ag-field__hint">Uncheck to stop all Guardian emails. Leave blank to use the WordPress admin email.</span>
+							</div>
+						</div>
+
+						<div class="ag-policy__footer">
+							<button type="submit" class="ag-btn ag-btn--primary">Save policy</button>
+						</div>
+					</form>
 				</div>
-				<form class="ag-policy" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-					<?php wp_nonce_field( 'ag_save_settings' ); ?>
-					<input type="hidden" name="action" value="ag_save_settings" />
-
-					<div class="ag-field">
-						<div class="ag-field__label">
-							Patch releases
-							<span class="ag-field__hint">x.y.Z bumps</span>
-						</div>
-						<div class="ag-field__control">
-							Apply after
-							<input class="ag-input ag-input--num" type="number" name="ag_patch_delay" min="0" max="30" value="<?php echo (int) $s['patch_delay_days']; ?>" />
-							day(s). <span class="ag-field__hint" style="display:inline;margin:0">0 = immediately</span>
-						</div>
-					</div>
-
-					<div class="ag-field">
-						<div class="ag-field__label">
-							Minor releases
-							<span class="ag-field__hint">x.Y.z bumps</span>
-						</div>
-						<div class="ag-field__control">
-							Apply after
-							<input class="ag-input ag-input--num" type="number" name="ag_minor_delay" min="0" max="30" value="<?php echo (int) $s['minor_delay_days']; ?>" />
-							day(s)
-						</div>
-					</div>
-
-					<div class="ag-field">
-						<div class="ag-field__label">
-							Major releases
-							<span class="ag-field__hint">X.y.z bumps</span>
-						</div>
-						<div class="ag-field__control">
-							<label class="ag-check">
-								<input type="checkbox" name="ag_allow_major" value="1" <?php checked( $s['allow_major'], 1 ); ?> />
-								<span>Auto-apply after</span>
-							</label>
-							<input class="ag-input ag-input--num" type="number" name="ag_major_delay" min="0" max="60" value="<?php echo (int) $s['major_delay_days']; ?>" />
-							day(s). Off = always manual.
-						</div>
-					</div>
-
-					<div class="ag-field">
-						<div class="ag-field__label">Security fast-track</div>
-						<div class="ag-field__control">
-							<label class="ag-check">
-								<input type="checkbox" name="ag_security_fast" value="1" <?php checked( $s['security_fast'], 1 ); ?> />
-								<span>Skip the delay when the changelog mentions a security fix (patch and minor only)</span>
-							</label>
-						</div>
-					</div>
-
-					<div class="ag-field">
-						<div class="ag-field__label">
-							WordPress core
-							<span class="ag-field__hint">Same-branch releases only</span>
-						</div>
-						<div class="ag-field__control">
-							<label class="ag-check">
-								<input type="checkbox" name="ag_core_minor_updates" value="1" <?php checked( $s['core_minor_updates'], 1 ); ?> />
-								<span>Automatically apply WordPress maintenance and security releases; never major releases</span>
-							</label>
-						</div>
-					</div>
-
-					<div class="ag-field">
-						<div class="ag-field__label">
-							Never auto-update
-							<span class="ag-field__hint">One slug per line</span>
-						</div>
-						<div class="ag-field__control ag-field__control--stack">
-							<textarea class="ag-textarea" id="ag_denylist" name="ag_denylist" rows="4"><?php echo esc_textarea( $s['denylist'] ); ?></textarea>
-							<span class="ag-field__hint">Hard block — overrides everything, including auto-updates enabled elsewhere.</span>
-						</div>
-					</div>
-
-					<div class="ag-field">
-						<div class="ag-field__label">Email</div>
-						<div class="ag-field__control">
-							<label class="ag-check">
-								<input type="checkbox" name="ag_email_notify" value="1" <?php checked( $s['email_notify'], 1 ); ?> />
-								<span>Send digests for applied updates and newly blocked/failed updates</span>
-							</label>
-						</div>
-					</div>
-
-					<div class="ag-policy__footer">
-						<button type="submit" class="ag-btn ag-btn--primary">Save policy</button>
-					</div>
-				</form>
 			</section>
 
 			<?php
@@ -1534,22 +1667,24 @@ final class Ashford_Guardian {
 			do_action( 'ashford_guardian_admin_sections', $s );
 			?>
 
-			<section class="ag-section">
-				<div class="ag-section__head">
-					<h2 class="ag-section__title">Activity</h2>
-				</div>
-				<div class="ag-log">
-					<?php if ( empty( $log ) ) : ?>
-						<p class="ag-log__empty">No activity yet.</p>
-					<?php else : ?>
-						<?php foreach ( array_slice( $log, 0, 100 ) as $entry ) : ?>
-							<div class="ag-log__row">
-								<span class="ag-log__time"><?php echo esc_html( $entry['time'] ); ?></span>
-								<span class="ag-log__type ag-log__type--<?php echo esc_attr( $entry['type'] ); ?>"><?php echo esc_html( $entry['type'] ); ?></span>
-								<p class="ag-log__msg"><?php echo esc_html( $entry['message'] ); ?></p>
-							</div>
-						<?php endforeach; ?>
-					<?php endif; ?>
+			<section class="ag-section" id="ag-activity">
+				<div class="ag-card">
+					<div class="ag-card__head">
+						<h2 class="ag-section__title">Activity</h2>
+					</div>
+					<div class="ag-log">
+						<?php if ( empty( $log ) ) : ?>
+							<p class="ag-log__empty">No activity yet.</p>
+						<?php else : ?>
+							<?php foreach ( array_slice( $log, 0, 100 ) as $entry ) : ?>
+								<div class="ag-log__row">
+									<span class="ag-log__time"><?php echo esc_html( $entry['time'] ); ?></span>
+									<span class="ag-log__type ag-log__type--<?php echo esc_attr( $entry['type'] ); ?>"><?php echo esc_html( $entry['type'] ); ?></span>
+									<p class="ag-log__msg"><?php echo esc_html( $entry['message'] ); ?></p>
+								</div>
+							<?php endforeach; ?>
+						<?php endif; ?>
+					</div>
 				</div>
 			</section>
 		</div>

@@ -4,7 +4,7 @@ Tags: updates, auto-update, maintenance, security, monitoring
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.3.0
+Stable tag: 2.4.0
 License: GPL-2.0+
 
 Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. WordPress same-branch maintenance/security releases are applied automatically.
@@ -33,6 +33,12 @@ Optionally, pair the site with a **Guardian Hub** for centralized fleet visibili
 4. Optionally pair with a Guardian Hub under Tools → Guardian → Guardian Hub (enter the hub URL, pair, then paste the API key once the operator approves the site).
 
 == Changelog ==
+
+= 2.4.0 =
+* Refresh Tools → Guardian with a card-based UI and primary accent #1F62FF.
+* Add per-update “Update now” actions for plugins and same-branch WordPress core.
+* Choose a notification email and turn digests off entirely from Policy.
+* Hide unused Guardian Hub and Hub activity admin sections.
 
 = 2.3.0 =
 * Self-heal the hub event queue table on load via a version-gated schema migrate, so sites that updated past 2.2.0 without reactivating no longer lose check-in events.

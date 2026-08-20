@@ -48,8 +48,9 @@ final class Ashford_Guardian_Hub {
 		// works entirely from local storage — no hub round-trip required.
 		add_filter( 'ashford_guardian_denylist', array( $this, 'filter_denylist' ) );
 
-		// Render the "Hub" section on Tools → Guardian.
-		add_action( 'ashford_guardian_admin_sections', array( $this, 'render_admin_section' ) );
+		// Hub admin sections are hidden while the hub is unused; pairing handlers
+		// stay registered so an existing connection can still be managed via URL.
+		// add_action( 'ashford_guardian_admin_sections', array( $this, 'render_admin_section' ) );
 
 		add_action( 'admin_post_ag_hub_save_url', array( $this, 'handle_save_url' ) );
 		add_action( 'admin_post_ag_hub_pair', array( $this, 'handle_pair' ) );
