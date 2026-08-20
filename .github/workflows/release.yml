@@ -3,10 +3,11 @@
 # Push a tag like v2.0.1 and this workflow:
 #   1. verifies the tag matches the version in ashford-guardian.php
 #   2. builds a clean ashford-guardian.zip (repo files, minus dev files)
-#   3. creates a GitHub Release with the zip attached
+#   3. writes update-info.json for Plugin Update Checker (no GitHub API)
+#   4. creates a GitHub Release with the zip + metadata attached
 #
-# Plugin Update Checker (embedded in the plugin) picks up the release asset,
-# and every site running the plugin sees a normal WordPress update.
+# Sites read update-info.json from:
+#   https://github.com/ashfordcreative/guardian/releases/latest/download/update-info.json
 #
 # File location in the repo: .github/workflows/release.yml
 
@@ -37,8 +38,9 @@ jobs:
             exit 1
           fi
 
-      - name: Build zip
+      - name: Build zip and update metadata
         run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p build/ashford-guardian
           rsync -a ./ build/ashford-guardian \
             --exclude ".git" \
@@ -52,8 +54,34 @@ jobs:
           zip -rq ashford-guardian.zip ashford-guardian
           unzip -l ashford-guardian.zip | head -20
 
+          python3 - <<PY
+          import json
+          from datetime import datetime, timezone
+          version = "${TAG_VERSION}"
+          data = {
+            "name": "Ashford Guardian",
+            "slug": "ashford-guardian",
+            "version": version,
+            "download_url": f"https://github.com/ashfordcreative/guardian/releases/download/v{version}/ashford-guardian.zip",
+            "homepage": "https://ashfordcreative.com",
+            "requires": "6.0",
+            "tested": "6.8",
+            "requires_php": "7.4",
+            "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "sections": {
+              "description": "Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility."
+            },
+          }
+          with open("update-info.json", "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+          PY
+          python3 -m json.tool update-info.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/ashford-guardian.zip
+          files: |
+            build/ashford-guardian.zip
+            build/update-info.json
           generate_release_notes: true

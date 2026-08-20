@@ -3,7 +3,7 @@
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
  * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. Policy keeps working even if the hub is unreachable.
- * Version:           2.4.2
+ * Version:           2.4.3
  * Author:            Ashford Creative
  * License:           GPL-2.0+
  * Requires at least: 6.0
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ASH_GUARDIAN_VERSION', '2.4.2' );
+define( 'ASH_GUARDIAN_VERSION', '2.4.3' );
 define( 'ASH_GUARDIAN_FILE', __FILE__ );
 define( 'ASH_GUARDIAN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -48,32 +48,26 @@ foreach (
 add_action( 'plugins_loaded', array( 'Ashford_Guardian_Schema', 'maybe_migrate' ), 5 );
 
 /*
- * GitHub-powered updates.
+ * Self-updates via a static release metadata JSON (not the GitHub API).
  *
- * Sites check the GitHub repo for new releases and surface them as normal
- * WordPress plugin updates (visible in wp-admin and ManageWP).
+ * Shared hosts often hit GitHub's unauthenticated API rate limit (60/hour),
+ * which surfaces as HTTP 403 from Plugin Update Checker. Reading
+ * update-info.json from the latest release download URL avoids the API.
  *
- * Set the repo below (or define ASH_GUARDIAN_GITHUB_REPO in wp-config.php).
- * For a private repo, define ASH_GUARDIAN_GITHUB_TOKEN with a read-only
- * fine-grained personal access token.
+ * Override with ASH_GUARDIAN_UPDATE_URL in wp-config.php if needed.
  */
 if ( file_exists( ASH_GUARDIAN_DIR . 'vendor/plugin-update-checker/plugin-update-checker.php' ) ) {
 	require_once ASH_GUARDIAN_DIR . 'vendor/plugin-update-checker/plugin-update-checker.php';
 
-	$ash_guardian_repo = defined( 'ASH_GUARDIAN_GITHUB_REPO' )
-		? ASH_GUARDIAN_GITHUB_REPO
-		: 'https://github.com/ashfordcreative/guardian/';
+	$ash_guardian_metadata = defined( 'ASH_GUARDIAN_UPDATE_URL' )
+		? ASH_GUARDIAN_UPDATE_URL
+		: 'https://github.com/ashfordcreative/guardian/releases/latest/download/update-info.json';
 
-	$ash_guardian_updates = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-		$ash_guardian_repo,
+	\YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+		$ash_guardian_metadata,
 		ASH_GUARDIAN_FILE,
 		'ashford-guardian'
 	);
-	$ash_guardian_updates->getVcsApi()->enableReleaseAssets();
-
-	if ( defined( 'ASH_GUARDIAN_GITHUB_TOKEN' ) && ASH_GUARDIAN_GITHUB_TOKEN ) {
-		$ash_guardian_updates->setAuthentication( ASH_GUARDIAN_GITHUB_TOKEN );
-	}
 }
 
 final class Ashford_Guardian {

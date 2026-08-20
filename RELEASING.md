@@ -7,17 +7,12 @@ Repo layout assumption: the repository root **is** the plugin folder
 ## One-time setup
 
 1. Commit `release.yml` to `.github/workflows/release.yml` in the repo.
-2. In `ashford-guardian.php`, set the repo URL in the update-checker block
-   (`https://github.com/ashfordcreative/guardian/`). Commit.
-3. **Private repo only:** on each site (or in a mu-plugin shared across your
-   maintenance stack), add to `wp-config.php`:
+2. Sites check for updates via the release metadata file (no GitHub API):
 
-   ```php
-   define( 'ASH_GUARDIAN_GITHUB_TOKEN', 'github_pat_XXXX' );
-   ```
+   `https://github.com/ashfordcreative/guardian/releases/latest/download/update-info.json`
 
-   Use a fine-grained PAT scoped to this one repo, read-only Contents
-   permission. If the repo is public, skip this entirely — no token needed.
+   Override with `ASH_GUARDIAN_UPDATE_URL` in `wp-config.php` only if you host
+   metadata elsewhere.
 
 ## Shipping a release
 
@@ -34,9 +29,9 @@ Repo layout assumption: the repository root **is** the plugin folder
    git push && git push --tags
    ```
 
-4. The Action builds `ashford-guardian.zip` and attaches it to a GitHub
-   Release. If the tag doesn't match the plugin header, the build fails
-   loudly instead of shipping a mismatched version.
+4. The Action builds `ashford-guardian.zip` and `update-info.json`, then
+   attaches both to a GitHub Release. If the tag doesn't match the plugin
+   header, the build fails loudly instead of shipping a mismatched version.
 
 ## What sites see
 
