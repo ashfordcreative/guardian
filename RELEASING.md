@@ -14,6 +14,24 @@ Repo layout assumption: the repository root **is** the plugin folder
    Override with `ASH_GUARDIAN_UPDATE_URL` in `wp-config.php` only if you host
    metadata elsewhere.
 
+## Migrating a fleet stuck on GitHub API 403s (pre-2.4.3)
+
+Sites still on ≤2.4.2 talk to the GitHub API and can hit shared-host rate
+limits. They cannot self-update to 2.4.3 until one of these happens once:
+
+1. **Temporary token (best for many sites):** create a fine-grained read-only
+   PAT for `ashfordcreative/guardian`, put it in
+   `tools/ashford-guardian-update-bridge.php`, push that file to
+   `wp-content/mu-plugins/` on every site (ManageWP / MainWP), check for
+   updates, install 2.4.3+, then delete the mu-plugin.
+2. **Bulk zip:** push
+   `https://github.com/ashfordcreative/guardian/releases/download/v2.4.3/ashford-guardian.zip`
+   to all sites via ManageWP / MainWP “install plugin from zip”.
+3. **Per-site wp-config:** `define( 'ASH_GUARDIAN_GITHUB_TOKEN', '…' );`
+   then check for updates (same idea as option 1).
+
+After 2.4.3+, updates use `update-info.json` and no longer need a token.
+
 ## Shipping a release
 
 1. Make your changes.
