@@ -4,10 +4,10 @@ Tags: updates, auto-update, maintenance, security, monitoring
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 2.4.3
+Stable tag: 2.4.4
 License: GPL-2.0+
 
-Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. WordPress same-branch maintenance/security releases are applied automatically.
+Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility. Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors auto-apply after 1 day. WordPress same-branch maintenance/security releases are applied automatically.
 
 == Description ==
 
@@ -15,7 +15,7 @@ Ashford Guardian decides which plugin updates WordPress may auto-apply:
 
 * Patch (x.y.Z) — apply immediately
 * Minor (x.Y.z) — apply after a configurable safety delay (default 3 days)
-* Major (X.y.z) — manual only (optional auto after delay)
+* Major (X.y.z) — auto-apply after 1 day by default, with one email when the release is first seen. Notify-only and fully manual are available.
 * Security-flagged changelog — fast-tracked (delay skipped for patch/minor)
 * Denylisted slug — never touched
 * License-blocked or failed auto-updates — tagged in the UI and emailed once per issue
@@ -33,6 +33,11 @@ Optionally, pair the site with a **Guardian Hub** for centralized fleet visibili
 4. Optionally pair with a Guardian Hub under Tools → Guardian → Guardian Hub (enter the hub URL, pair, then paste the API key once the operator approves the site).
 
 == Changelog ==
+
+= 2.4.4 =
+* Auto-apply major plugin releases after 1 day by default.
+* Email once when a major release is first seen, so it can be applied before the delay ends.
+* Policy can switch majors to notify-only or fully manual.
 
 = 2.4.3 =
 * Check for plugin updates via release metadata JSON instead of the GitHub API, avoiding shared-host 403 rate limits.
