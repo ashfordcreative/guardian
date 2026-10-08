@@ -10,7 +10,7 @@ Every hour (WP-Cron), Guardian refreshes update data and lets WordPress run auto
 |---|---|
 | Patch (x.y.**Z**) | Apply immediately |
 | Minor (x.**Y**.z) | Apply after 3-day safety delay |
-| Major (**X**.y.z) | Manual only (optional auto after 7 days) |
+| Major (**X**.y.z) | Auto-apply after 1 day (email when seen; can switch to notify-only or fully manual) |
 | Security-flagged changelog | Fast-tracked — delay skipped (patch/minor) |
 | WordPress core (same branch) | Apply maintenance/security immediately; never major |
 | Denylisted slug | Never touched, hard block |
@@ -32,6 +32,7 @@ Zip → ManageWP bulk install → activate. Policy defaults are sane; tune under
 - **Denylist** anything fragile (page builders on brittle sites).
 - **Backups**: keep ManageWP scheduled backups on; the log identifies rollback targets.
 - **Digest email** per update run + full activity log for client reporting.
+- **Major plugin releases** auto-apply after 1 day by default, and send one email as soon as they are seen so they can be applied sooner. Notify-only and fully manual are available under Tools → Guardian. WordPress core major upgrades stay manual.
 
 ## Notes
 

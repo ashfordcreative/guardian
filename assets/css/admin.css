@@ -610,6 +610,17 @@
 	accent-color: var(--ag-accent);
 }
 
+.ag-field__control--stack > .ag-check {
+	align-items: flex-start;
+}
+
+.ag-major-auto {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 8px;
+}
+
 .ag-policy__footer {
 	display: flex;
 	justify-content: flex-start;
@@ -655,7 +666,8 @@
 	color: var(--ag-sage);
 }
 
-.ag-log__type--observe {
+.ag-log__type--observe,
+.ag-log__type--notify {
 	color: var(--ag-warn);
 }
 

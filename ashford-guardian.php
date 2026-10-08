@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Ashford Guardian
  * Plugin URI:        https://ashfordcreative.com
- * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors left for humans. Policy keeps working even if the hub is unreachable.
+ * Description:       Self-contained smart auto-updates, with an optional Guardian Hub connection for fleet visibility (check-ins, activity, update reporting). Patch releases apply immediately, minor releases after a safety delay, security-flagged changelogs fast-tracked, majors auto-apply after 1 day. Policy keeps working even if the hub is unreachable.
  * Version:           2.4.3
  * Author:            Ashford Creative
  * License:           GPL-2.0+
@@ -78,6 +78,7 @@ final class Ashford_Guardian {
 	const OPT_LOG           = 'ag_log';
 	const OPT_SETTINGS      = 'ag_settings';
 	const OPT_NOTIFY_Q      = 'ag_notify_queue';
+	const OPT_MAJOR_NOTIFIED = 'ag_major_notified'; // "slug|version" => unix time a waiting major was emailed
 	const OPT_UPDATE_BLOCKS = 'ag_update_blocks'; // slug => blocked/failed update issue
 	const CORE_BLOCK_KEY    = 'wordpress';
 	const LOG_MAX           = 300;
@@ -134,13 +135,18 @@ final class Ashford_Guardian {
 
 	public function get_settings() {
 		if ( null === $this->settings ) {
+			$stored = get_option( self::OPT_SETTINGS, array() );
+			if ( ! is_array( $stored ) ) {
+				$stored = array();
+			}
 			$this->settings = wp_parse_args(
-				get_option( self::OPT_SETTINGS, array() ),
+				$stored,
 				array(
 					'patch_delay_days'  => 0,   // x.y.Z bumps: immediate
 					'minor_delay_days'  => 3,   // x.Y.z bumps: wait for ecosystem fallout
-					'allow_major'       => 0,   // X.y.z bumps: manual by default
-					'major_delay_days'  => 7,
+					'allow_major'       => 1,   // legacy mirror of major_mode === auto
+					'major_mode'        => 'auto', // notify | auto | manual
+					'major_delay_days'  => 1,
 					'security_fast'     => 1,   // changelog says "security" => skip the delay (patch/minor)
 					'core_minor_updates'=> 1,   // same-branch WP maintenance/security releases
 					'email_notify'      => 1,
@@ -148,8 +154,32 @@ final class Ashford_Guardian {
 					'denylist'          => '',  // one slug per line, never auto-updated
 				)
 			);
+			$this->settings = $this->normalize_major_policy( $this->settings, $stored );
 		}
 		return $this->settings;
+	}
+
+	/**
+	 * Major policy defaults to auto-apply after 1 day.
+	 * A saved notify or manual choice is left alone. Sites still on the old
+	 * factory default (majors off, 7-day delay unused) pick up auto after 1 day.
+	 * Sites that had already turned auto-apply on keep their delay.
+	 *
+	 * @param array $settings Merged settings.
+	 * @param array $stored   Option value before defaults were filled in.
+	 * @return array
+	 */
+	private function normalize_major_policy( array $settings, array $stored ) {
+		$mode = isset( $stored['major_mode'] ) ? (string) $stored['major_mode'] : '';
+		if ( ! in_array( $mode, array( 'notify', 'auto', 'manual' ), true ) ) {
+			$mode = 'auto';
+			if ( empty( $stored['allow_major'] ) ) {
+				$settings['major_delay_days'] = 1;
+			}
+		}
+		$settings['major_mode']  = $mode;
+		$settings['allow_major'] = ( 'auto' === $mode ) ? 1 : 0;
+		return $settings;
 	}
 
 	/**
@@ -263,6 +293,7 @@ final class Ashford_Guardian {
 
 		$this->sync_license_blocks( $updates );
 		$this->sync_core_update_state( $core_offer );
+		$this->maybe_notify_major_updates( $updates );
 		$this->maybe_notify_blocked_updates();
 	}
 
@@ -509,11 +540,11 @@ final class Ashford_Guardian {
 				return $update;
 
 			case 'major':
-				if ( $s['allow_major'] && $age >= (int) $s['major_delay_days'] ) {
+				if ( 'auto' === $s['major_mode'] && $age >= (int) $s['major_delay_days'] ) {
 					$this->queue_log( 'approve', sprintf( 'Approved %s %s → %s (major release, %d-day delay elapsed).', $item->slug, $info['current'], $item->new_version, (int) $s['major_delay_days'] ) );
 					return true;
 				}
-				return $update; // manual territory
+				return false;
 
 			default:
 				return $update; // unparseable version scheme — leave to defaults
@@ -957,6 +988,96 @@ final class Ashford_Guardian {
 		update_option( self::OPT_UPDATE_BLOCKS, $blocks, false );
 	}
 
+	/**
+	 * One email per major version that Guardian is not applying on this run.
+	 * Auto mode (the default, after 1 day) still emails once during the delay
+	 * so the release can be applied before it elapses. Notify mode never auto-applies.
+	 *
+	 * @param array<string, array> $updates Pending plugin updates.
+	 */
+	private function maybe_notify_major_updates( array $updates ) {
+		$s         = $this->get_settings();
+		$notified  = get_option( self::OPT_MAJOR_NOTIFIED, array() );
+		if ( ! is_array( $notified ) ) {
+			$notified = array();
+		}
+		$denylist  = $this->get_denylist();
+		$fresh     = array();
+		$valid     = array();
+
+		foreach ( $updates as $slug => $info ) {
+			if ( 'major' !== $this->classify( $info['current'], $info['new_version'] ) ) {
+				continue;
+			}
+			$key           = $slug . '|' . $info['new_version'];
+			$valid[ $key ] = 1;
+
+			if ( in_array( $slug, $denylist, true ) || self::package_is_missing( $info['item'] ?? null ) ) {
+				continue;
+			}
+			if ( 'manual' === $s['major_mode'] ) {
+				continue;
+			}
+
+			$age = $this->update_age_days( $slug, $info['new_version'] );
+			if ( 'auto' === $s['major_mode'] && $age >= (int) $s['major_delay_days'] ) {
+				continue;
+			}
+			if ( ! empty( $notified[ $key ] ) ) {
+				continue;
+			}
+
+			$fresh[ $key ] = array(
+				'slug'    => $slug,
+				'name'    => $info['name'] ?? $slug,
+				'current' => $info['current'],
+				'version' => $info['new_version'],
+			);
+		}
+
+		$notified = array_intersect_key( $notified, $valid );
+
+		if ( $fresh && $s['email_notify'] && 'manual' !== $s['major_mode'] ) {
+			$host  = wp_parse_url( home_url(), PHP_URL_HOST );
+			$lines = array();
+			foreach ( $fresh as $row ) {
+				$lines[] = sprintf(
+					'- %s (%s): %s → %s',
+					$row['name'],
+					$row['slug'],
+					$row['current'],
+					$row['version']
+				);
+			}
+
+			if ( 'auto' === $s['major_mode'] ) {
+				$intro = sprintf(
+					"Ashford Guardian found major plugin releases. They will auto-apply after %d day(s). Apply sooner from Guardian if you don't want to wait:",
+					(int) $s['major_delay_days']
+				);
+			} else {
+				$intro = 'Ashford Guardian found major plugin releases. These are not applied automatically:';
+			}
+
+			wp_mail(
+				$this->get_notify_email(),
+				sprintf( '[%s] Guardian: %d major update(s) waiting', $host, count( $fresh ) ),
+				$intro . "\n\n"
+				. implode( "\n", $lines )
+				. "\n\nSite: " . home_url()
+				. "\nTime: " . current_time( 'mysql' )
+				. "\nUpdates: " . admin_url( 'tools.php?page=ashford-guardian' )
+			);
+
+			foreach ( array_keys( $fresh ) as $key ) {
+				$notified[ $key ] = time();
+			}
+			$this->log( 'notify', sprintf( 'Emailed %d major release(s) waiting for a decision.', count( $fresh ) ) );
+		}
+
+		update_option( self::OPT_MAJOR_NOTIFIED, $notified, false );
+	}
+
 	/* ------------------------------------------------------------------ */
 	/* Logging + notification                                              */
 	/* ------------------------------------------------------------------ */
@@ -1139,7 +1260,7 @@ final class Ashford_Guardian {
 		}
 
 		if ( 'major' === $type ) {
-			if ( $s['allow_major'] ) {
+			if ( 'auto' === $s['major_mode'] ) {
 				$due = $age >= (int) $s['major_delay_days'];
 				return array(
 					'type'       => $type,
@@ -1157,7 +1278,7 @@ final class Ashford_Guardian {
 				'age'        => $age,
 				'is_sec'     => $is_sec,
 				'is_license' => false,
-				'decision'   => 'Major — manual',
+				'decision'   => 'notify' === $s['major_mode'] ? 'Major — apply manually' : 'Major — manual',
 				'status'     => 'manual',
 			);
 		}
@@ -1268,11 +1389,16 @@ final class Ashford_Guardian {
 		if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'ag_save_settings' ) ) {
 			wp_die( 'Not allowed.' );
 		}
+		$major_mode = isset( $_POST['ag_major_mode'] ) ? sanitize_key( wp_unslash( $_POST['ag_major_mode'] ) ) : 'auto';
+		if ( ! in_array( $major_mode, array( 'notify', 'auto', 'manual' ), true ) ) {
+			$major_mode = 'auto';
+		}
 		$settings = array(
 			'patch_delay_days'   => max( 0, (int) ( $_POST['ag_patch_delay'] ?? 0 ) ),
 			'minor_delay_days'   => max( 0, (int) ( $_POST['ag_minor_delay'] ?? 3 ) ),
-			'allow_major'        => empty( $_POST['ag_allow_major'] ) ? 0 : 1,
-			'major_delay_days'   => max( 0, (int) ( $_POST['ag_major_delay'] ?? 7 ) ),
+			'major_mode'         => $major_mode,
+			'allow_major'        => ( 'auto' === $major_mode ) ? 1 : 0,
+			'major_delay_days'   => max( 0, (int) ( $_POST['ag_major_delay'] ?? 1 ) ),
 			'security_fast'      => empty( $_POST['ag_security_fast'] ) ? 0 : 1,
 			'core_minor_updates' => empty( $_POST['ag_core_minor_updates'] ) ? 0 : 1,
 			'email_notify'       => empty( $_POST['ag_email_notify'] ) ? 0 : 1,
@@ -1353,9 +1479,13 @@ final class Ashford_Guardian {
 			}
 		}
 
-		$major_label = $s['allow_major']
-			? sprintf( 'auto after %d day(s)', (int) $s['major_delay_days'] )
-			: 'manual';
+		if ( 'auto' === $s['major_mode'] ) {
+			$major_label = sprintf( 'auto after %d day(s), emailed when seen', (int) $s['major_delay_days'] );
+		} elseif ( 'manual' === $s['major_mode'] ) {
+			$major_label = 'manual, no email';
+		} else {
+			$major_label = 'emailed when seen';
+		}
 		$summary     = sprintf(
 			'Patch after %d day(s) · minor after %d day(s) · majors %s%s%s',
 			(int) $s['patch_delay_days'],
@@ -1583,13 +1713,23 @@ final class Ashford_Guardian {
 								Major releases
 								<span class="ag-field__hint">X.y.z bumps</span>
 							</div>
-							<div class="ag-field__control">
+							<div class="ag-field__control ag-field__control--stack">
+								<div class="ag-major-auto">
+									<label class="ag-check">
+										<input type="radio" name="ag_major_mode" value="auto" <?php checked( $s['major_mode'], 'auto' ); ?> />
+										<span>Auto-apply after</span>
+									</label>
+									<input class="ag-input ag-input--num" type="number" name="ag_major_delay" min="0" max="60" value="<?php echo (int) $s['major_delay_days']; ?>" />
+									<span>day(s). One email goes out immediately so it can be applied sooner.</span>
+								</div>
 								<label class="ag-check">
-									<input type="checkbox" name="ag_allow_major" value="1" <?php checked( $s['allow_major'], 1 ); ?> />
-									<span>Auto-apply after</span>
+									<input type="radio" name="ag_major_mode" value="notify" <?php checked( $s['major_mode'], 'notify' ); ?> />
+									<span>Email once when a major appears, and leave it for someone to apply</span>
 								</label>
-								<input class="ag-input ag-input--num" type="number" name="ag_major_delay" min="0" max="60" value="<?php echo (int) $s['major_delay_days']; ?>" />
-								day(s). Off = always manual.
+								<label class="ag-check">
+									<input type="radio" name="ag_major_mode" value="manual" <?php checked( $s['major_mode'], 'manual' ); ?> />
+									<span>Leave manual and do not email</span>
+								</label>
 							</div>
 						</div>
 
@@ -1630,7 +1770,7 @@ final class Ashford_Guardian {
 						<div class="ag-field">
 							<div class="ag-field__label">
 								Email notifications
-								<span class="ag-field__hint">Applied and blocked digests</span>
+								<span class="ag-field__hint">Applied, blocked, and waiting majors</span>
 							</div>
 							<div class="ag-field__control ag-field__control--stack">
 								<label class="ag-check">
